@@ -32,7 +32,13 @@ def mvmc_create(
     lattice: str = typer.Option("Tetragonal", help="mVMC lattice type."),
     t: float = typer.Option(1.0, help="Hopping parameter t."),
     u: float = typer.Option(8.0, "--u", help="On-site interaction U."),
-    ncond: int = typer.Option(100, help="Number of condition numbers."),
+    ncond: int | None = typer.Option(
+        None,
+        help=(
+            "Electron count control (StdFace alias of 'nelec'; Ne = ncond/2). "
+            "Defaults to half filling (W*L, rounded down to even) when omitted."
+        ),
+    ),
     nsr_opt_itr_step: int = typer.Option(1, help="Number of SR optimization steps."),
     nvmc_sample: int = typer.Option(4000, help="Number of VMC samples."),
     sz2: int = typer.Option(0, "--2sz", help="Total 2*Sz."),
@@ -48,7 +54,7 @@ def mvmc_create(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     sys_name = f"mVMC-{w}-{l}"
-    inp = mvmc_lib.create_input(
+    create_kwargs = dict(
         W=w,
         L=l,
         Wsub=wsub,
@@ -57,11 +63,13 @@ def mvmc_create(
         lattice=lattice,
         t=t,
         U=u,
-        ncond=ncond,
         NSROptItrStep=nsr_opt_itr_step,
         NVMCSample=nvmc_sample,
         **{"2Sz": sz2},
     )
+    if ncond is not None:
+        create_kwargs["ncond"] = ncond
+    inp = mvmc_lib.create_input(**create_kwargs)
     inp_path = output_dir / f"{sys_name}.inp"
     inp_path.write_text(inp)
 

@@ -23,12 +23,22 @@ def create_input(**kwargs):
     Any keyword argument will update the default values.
     Mainly you should pass W and L.
 
+    ncond is StdFace's electron-count control (an alias of 'nelec': mVMC sets
+    Ne = ncond / 2). It defaults to half filling, W*L rounded down to an even
+    number, so the actual linear-algebra problem size scales with the
+    lattice. Pass ncond explicitly to override.
+
     Parameters:
         **kwargs: Arbitrary keyword arguments to update the template.
 
     Returns:
         str: The formatted input string.
     """
+    W = kwargs.get("W", 10)
+    L = kwargs.get("L", 10)
+    nsite = W * L
+    half_filling_ncond = nsite - (nsite % 2)
+
     template = {
         "W": 10,
         "L": 10,
@@ -38,7 +48,7 @@ def create_input(**kwargs):
         "lattice": "Tetragonal",
         "t": 1.0,
         "U": 8.0,
-        "ncond": 100,
+        "ncond": half_filling_ncond,
         "NSROptItrStep": 1,
         "NVMCSample": 4000,
         "2Sz": 0,
