@@ -17,25 +17,41 @@ mpiexec vmc.out -s {sys_name}.inp
 """
 
 
+# Models with no itinerant-electron sector: StdFace hard-errors
+# (StdFace_exit) if ncond/nelec is specified for these.
+_SPIN_ONLY_MODELS = {"spin", "spingc", "spingcboost"}
+
+
 def create_input(**kwargs):
     """
     Create an input file for mVMC using a template dictionary.
     Any keyword argument will update the default values.
     Mainly you should pass W and L.
 
-    ncond is StdFace's electron-count control (an alias of 'nelec': mVMC sets
-    Ne = ncond / 2). It defaults to half filling, W*L rounded down to an even
-    number, so the actual linear-algebra problem size scales with the
-    lattice. Pass ncond explicitly to override.
+    Electron filling is always fixed at half filling (ncond = W*L, rounded
+    down to an even number) for itinerant-electron models -- this is not
+    overridable, so the linear-algebra problem size (Nsize = ncond) always
+    scales predictably with the lattice, and the FOM formula in fom.py can
+    derive it from W*L alone. ncond is omitted entirely for Spin-family
+    models, which don't have an itinerant-electron sector and error out if
+    it's specified at all.
 
     Parameters:
         **kwargs: Arbitrary keyword arguments to update the template.
+            ncond may not be passed; pass a different W/L to change filling.
 
     Returns:
         str: The formatted input string.
     """
+    if "ncond" in kwargs:
+        raise TypeError(
+            "ncond is not configurable: filling is fixed at half filling "
+            "(ncond = W*L, rounded down to even). Change W/L instead."
+        )
+
     W = kwargs.get("W", 10)
     L = kwargs.get("L", 10)
+    model = kwargs.get("model", "FermionHubbard")
     nsite = W * L
     half_filling_ncond = nsite - (nsite % 2)
 
@@ -53,6 +69,8 @@ def create_input(**kwargs):
         "NVMCSample": 4000,
         "2Sz": 0,
     }
+    if model.lower() in _SPIN_ONLY_MODELS:
+        del template["ncond"]
     # Update with user values
     template.update(kwargs)
     # Format as input string

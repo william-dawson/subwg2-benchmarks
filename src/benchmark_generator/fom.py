@@ -1,9 +1,14 @@
 """Figure-of-merit calculations for completed mVMC and SALMON runs."""
 
+# NQPFull = NSPGaussLeg * NMPTrans. benchgen mvmc create never sets
+# NSPGaussLeg/NMPTrans, so StdFace's defaults (8 and 1) always apply,
+# giving NQPFull=8. Update this if those ever become configurable.
+MVMC_NQPFULL_DEFAULT = 8
+
 
 def mvmc_get_size(infile):
     with open(infile) as ifile:
-        W = L = Wsub = Lsub = None
+        W = L = NVMCSample = None
         for line in ifile:
             split = line.split()
             if not split:
@@ -12,11 +17,9 @@ def mvmc_get_size(infile):
                 W = int(split[-1])
             elif split[0] == "L":
                 L = int(split[-1])
-            elif split[0] == "Wsub":
-                Wsub = int(split[-1])
-            elif split[0] == "Lsub":
-                Lsub = int(split[-1])
-    return W, L, Wsub, Lsub
+            elif split[0] == "NVMCSample":
+                NVMCSample = int(split[-1])
+    return W, L, NVMCSample
 
 
 def mvmc_get_time(tfile):
@@ -36,11 +39,20 @@ def mvmc_fom(infile, tfile):
 
     Returns:
         float: Time to solution divided by the scaling cost,
-            [(Lsub*Wsub) * (L*W) + (L*W)]^3.
+            NVMCSample * NQPFull * (W*L)^3.
+
+            This models the dominant cost in a run: the Pfaffian-update
+            work done during Monte Carlo sampling (UpdateMAll plus the
+            periodic from-scratch CalculateMAll recomputes), which scales
+            as O(NVMCSample * NQPFull * Nsize^3) where Nsize is the
+            itinerant-electron count. benchgen mvmc create always fixes
+            filling at half filling (Nsize = W*L), so W*L stands in for
+            Nsize here directly -- ncond is deliberately not read from
+            the input file, since it's no longer a free variable.
     """
     time = mvmc_get_time(tfile)
-    W, L, Wsub, Lsub = mvmc_get_size(infile)
-    work = ((Lsub * Wsub) * (L * W) + (L * W)) ** 3
+    W, L, NVMCSample = mvmc_get_size(infile)
+    work = NVMCSample * MVMC_NQPFULL_DEFAULT * (W * L) ** 3
     return time / work
 
 

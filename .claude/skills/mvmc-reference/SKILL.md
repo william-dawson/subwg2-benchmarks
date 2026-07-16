@@ -42,18 +42,23 @@ https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
   each lattice vector). `Wsub`, `Lsub` optionally force pair-orbital
   symmetry under sublattice translation; default is no sublattice
   (`Wsub=W`, `Lsub=L`).
-- **`ncond`** — **must be specified**; the total number of itinerant
-  electrons (↑ + ↓ combined). `nelec` is a plain alias for the same field
-  in StdFace's source. mVMC sets `Ne = (NLocSpin + ncond) / 2`, and for
-  `FermionHubbard` (`NLocSpin=0`) that's just `Ne = ncond / 2`. **`ncond`
-  does not scale with `W`/`L` automatically** — if you want a fixed physical
-  density (e.g. half filling) across different lattice sizes, you must set
-  `ncond` yourself proportional to `W*L`, and it must be even. `benchgen
-  mvmc create` in this repo now defaults `ncond` to half filling (`W*L`,
-  rounded down to even) for exactly this reason — earlier versions held it
-  at a fixed 100 regardless of lattice size, which silently kept the actual
-  matrix dimension (and thus the real compute cost) constant no matter what
-  `W`/`L` you asked for.
+- **`ncond`** — StdFace's electron-count control (`nelec` is a plain alias
+  for the same field). mVMC sets `Ne = (NLocSpin + ncond) / 2`, and for
+  `FermionHubbard` (`NLocSpin=0`) that's just `Ne = ncond / 2` — this is the
+  itinerant-electron count that sets `Nsize`, the actual matrix dimension
+  driving VMC cost. **This repo's `create_input`/`benchgen mvmc create`
+  does not let you set `ncond` at all** — filling is hardcoded to half
+  filling (`ncond = W*L`, rounded down to even) so the real linear-algebra
+  problem size always scales predictably with `W`/`L`, and the FOM formula
+  in `fom.py` can derive `Nsize` from `W*L` without needing to parse
+  `ncond` out of the file. Passing `ncond` to `create_input` raises
+  `TypeError`; change `W`/`L` instead. (An earlier version of this tool
+  exposed `ncond` as a tunable defaulting to a fixed 100 regardless of
+  lattice size, which silently decoupled `W`/`L` from the actual compute
+  cost — that's why it was removed rather than just fixed to default
+  correctly.) `ncond` is omitted entirely for `Spin`-family models, since
+  StdFace hard-errors (`StdFace_exit`) if it's specified where there's no
+  itinerant-electron sector.
 - `NVMCSample` — Monte Carlo samples per optimization step **per MPI rank**
   (see parallelization below). mVMC's own documented default is 1000; this
   repo's CLI defaults to 4000.
