@@ -38,6 +38,23 @@ point at the sources instead:
   https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
 - Community workflow/examples: https://github.com/issp-center-dev/mVMC-tutorial
 - Source: https://github.com/issp-center-dev/mVMC
+- Key papers, bundled in `papers/` alongside this file (full bibliography:
+  `mVMC` source's `doc/bib/userguide.bib`):
+  - `papers/misawa-2019-mvmc-software.pdf` — the software paper itself
+    (arXiv:1711.11418, published as *Comp. Phys. Commun.* **235**, 447-462
+    (2019) — cite this if publishing results). Has an authoritative
+    Parallelization section (§3.5) and Benchmark section (§4); several
+    facts in this skill (the `NSplitSize`/MPI-vs-OpenMP mechanism, the
+    S-matrix memory ceiling) are sourced from here, not just from source
+    inspection.
+  - `papers/tahara-imada-2008-sr-method.pdf` — Tahara & Imada, *J. Phys.
+    Soc. Jpn.* **77**, 114701 (2008). The actual SR-method paper —
+    explains `NSROptItrStep`/`DSROptRedCut`/`DSROptStaDel` and the
+    quantum-number projection (`NQPFull`) machinery from first principles.
+  - `papers/wimmer-2012-pfapack.pdf` — Wimmer, *ACM Trans. Math. Software*
+    **38**, 30 (2012). PFAPACK itself — the algorithm behind `M_ZSKTRF` in
+    `CalculateMAll_fcmp`, i.e. the one OpenMP call site that's actually
+    well-suited to threading (see Parallelization below).
 
 ## Two run modes
 
@@ -135,6 +152,28 @@ trying to draw scaling conclusions from a benchmark.
   that crossover hasn't been located, and per the tutorial material below,
   real mVMC problem sizes (100-1000 sites) go well beyond anything tested
   here — so this is a real open question, not a closed one.
+- **`NSplitSize>1` is probably the real fix, per the software paper — still
+  untested by us.** Misawa et al. (2019, the mVMC software paper — see
+  `papers/1711.11418v2.pdf`), §3.5: "`N_sampler` independent Monte Carlo
+  samplers are created. The number of MPI processes per sampler is unity by
+  default but can be specified from the input file... the iterations of
+  loops for summations in the quantum-number projections are parallelized
+  using both MPI and OpenMP." That's the exact `qpidx`/`NQPFull` loop the
+  table above profiles — meaning `NSplitSize>1` converts that loop from
+  OpenMP-only to MPI-parallelized. MPI processes don't pay OpenMP's
+  per-call thread-team-formation cost, so this could sidestep the
+  overhead problem we measured entirely, on the *same* fixed calculation
+  (not just "more independent samplers"). We have not run `NSplitSize>1`
+  ourselves — this is the most promising next experiment, not a verified
+  result.
+- The same paper also confirms (§3.3.2) the S-matrix memory ceiling
+  discussed below in concrete terms: the default Cholesky solve becomes
+  impractical past **~10⁵ variational parameters**; `NSRCG=1` (CG method)
+  extends that into the hundred-thousands. And for the default (non-CG)
+  solve at scale, ScaLAPACK distributes the S-matrix in block-cyclic
+  fashion across the *inner* MPI dimension (`NSplitSize`) — i.e.
+  `-DUSE_SCALAPACK=ON` and `NSplitSize>1` are meant to be used together,
+  not independently.
 
 ## How big are real problems, and how do people scale up?
 
