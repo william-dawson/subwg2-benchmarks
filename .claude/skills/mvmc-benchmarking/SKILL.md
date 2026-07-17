@@ -11,6 +11,35 @@ does) and **mvmc-build** (how to build it) — it's specifically about
 answers so far. Uses the `benchgen mvmc create` CLI from
 **benchmark-generator** to generate inputs.
 
+## Golden rule: read timing from mVMC's own output, never from `time`
+
+**The authoritative time-to-solution is `zvo_CalcTimer.dat`'s `All` line
+(or `benchgen fom`, which already reads it correctly) — not the `real`
+value from wrapping a launch in `time mpirun ...`.** This isn't a style
+preference. On R-CCS Cloud's `rikyu` partition, a `W=10` run's wall-clock
+`time` reported **115s** while the same run's `zvo_CalcTimer.dat` `All`
+was **22.13s** — nearly identical to `qc-gh200`'s 22.19s at the same size.
+Repeated UCX InfiniBand-registration failures at MPI startup
+(`mlx5dv_devx_alloc_uar(...) ... Cannot allocate memory`) were adding
+~90s of pure launcher/network-setup noise to every wall-clock
+measurement, and that noise was mistaken for real compute cost through an
+entire investigation (see rikyu's row below and its history for the full
+story). Every configuration change tried during that investigation
+(removing the IB transport, single-socket pinning, rank-mapping strategy,
+BLAS vendor, compiler) was actually just reducing *that startup noise*,
+not real compute time — which is exactly why none of them meaningfully
+closed what looked like a performance gap to `qc-gh200` but never
+genuinely existed.
+
+Wall-clock time is still worth knowing (it's what a real user waits for,
+startup noise and all), but it must never be the number used to decide a
+machine's problem size, and it must never be assumed to equal the
+internal timer without checking. Confirm on every new machine: does the
+job's log start producing output within a few seconds of launch, or does
+it sit empty for tens of seconds first? An empty log for a while is the
+tell that wall-clock and internal timer are about to diverge — go straight
+to `zvo_CalcTimer.dat` rather than trusting `time`'s `real`.
+
 ## Methodology
 
 Deployment is fixed first, size is searched second — don't invert this:
@@ -69,7 +98,11 @@ Deployment is fixed first, size is searched second — don't invert this:
 7. **Check both `srun` and `mpirun`, on each new machine — don't assume
    `mpirun` is universal.** DGX Spark and `fx700`'s bundled Open MPI lack
    Slurm PMI support, so `srun` fails outright there (loud, immediate
-   error) and `mpirun` is the only option (see mvmc-build).
+   error) and `mpirun` is the only option (see mvmc-build). `rikyu` also
+   failed `srun` outright (bare `srun` errors at `MPI_Init`; `srun
+   --mpi=pmix_v3` there segfaults instead) — a different, also-loud
+   failure mode from `qc-gh200`'s silent one below. `mpirun`/`mpiexec` is
+   what's used on `rikyu`.
 
    On `qc-gh200`, bare `srun -n 72 ./vmc.out` did *not* fail loudly — it
    silently fell back to 72 independent single-rank processes (a known
@@ -94,9 +127,10 @@ Deployment is fixed first, size is searched second — don't invert this:
    can silently fragment into N independent single-rank processes on any
    machine, produce a perfectly clean-looking output file, and give a
    plausible timing number that isn't measuring what you think it is.
-   Confirmed working (and confirmed the recorded results were already
-   genuine) on `qc-gh200`, DGX Spark, and `fx700` — see each machine's row
-   below.
+   Confirmed working on every machine tested so far — `qc-gh200`, DGX
+   Spark, `fx700`, `genoa`, and `rikyu` (the last confirmed at both
+   single-node/144-rank and 2-node/288-rank scale) — see each machine's
+   row below.
 
 ## Recorded results
 
@@ -111,15 +145,28 @@ including DGX Spark and `fx700`, which were re-verified retroactively
 after the `qc-gh200` bug was found and turned out to have been genuine
 all along.
 
-| Machine | Cores | Build | Size | Wall time | Notes |
+**Timing source**: per the Golden Rule above, all times below are (or
+should be treated as) `zvo_CalcTimer.dat`'s `All` value, not raw
+wall-clock. DGX Spark, Mac, `fx700`, `qc-gh200`, and `genoa` all showed
+prompt log output (no multi-second silent gap at launch) and, where
+directly cross-checked (`qc-gh200`: wall 105.3s vs. internal 103.4s),
+wall-clock and internal timer agreed closely — consistent with these
+machines having negligible MPI-startup overhead, unlike `rikyu`. Still,
+these were recorded before the Golden Rule was formalized; treat them as
+reliable but not re-verified against `zvo_CalcTimer.dat` line-by-line,
+and re-check if a number here is ever surprising.
+
+| Machine | Cores | Build | Size | Time | Notes |
 |---|---|---|---|---|---|
 | R-CCS Cloud DGX Spark (`ng-dgx-m2`) | 20 (10 Cortex-X925 + 10 Cortex-A725) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 125.3s | `mpirun` (`srun` unsupported); `W=14` measured at 152s, over cap; binding flags retested and confirmed no-op (127.7s vs. 126.3s); walker-check re-verified at 130.3s, `IndependentWalkers=20` as expected |
 | Local Mac (Apple M4) | 10 (4P + 6E) | GCC-16 + Accelerate (mvmc-build recipe) | `W=12, L=12` (144 sites) | 73.3s | `mpirun` (only launcher available); `W=13` measured at ~150s, over cap |
 | R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | `mpirun` (`srun` unsupported); requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11`; walker-check re-verified at 155.1s, `IndependentWalkers=48` as expected |
-| R-CCS Cloud `qc-gh200` (NVIDIA Grace Hopper) | 72 (Neoverse-V2) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 108.2s | `mpirun` (bare `srun` is broken here — see methodology point 7; `srun --mpi=pmix_v3` also works and gives the same ~equivalent numbers, but `mpirun` needs no extra flag); walker-check confirmed `IndependentWalkers=72`; `W=14` re-measured at 269s — over 2x the cap, a much steeper jump than the other machines saw between adjacent sizes, plausibly memory-bandwidth contention across 72 ranks on one socket; `W=10` baseline (100 sites) measured at 22.2s for scale |
+| R-CCS Cloud `qc-gh200` (NVIDIA Grace Hopper) | 72 (Neoverse-V2) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 108.2s (wall 105.3-108.2s vs. internal 103.4s, cross-checked, closely agree) | `mpirun` (bare `srun` is broken here — see methodology point 7; `srun --mpi=pmix_v3` also works and gives the same ~equivalent numbers, but `mpirun` needs no extra flag); walker-check confirmed `IndependentWalkers=72`; `W=14` re-measured at 269s — over 2x the cap, a much steeper jump than the other machines saw between adjacent sizes, plausibly memory-bandwidth contention across 72 ranks on one socket; `W=10` baseline (100 sites) measured at 22.2s for scale |
 | R-CCS Cloud `genoa` (AMD EPYC 9684X) | 96 (SMT on, 192 logical — used 96 physical) | GCC + FlexiBLAS/OpenBLAS-OpenMP (mvmc-build recipe) | `W=13, L=13` (169 sites) | 102.2s | `mpirun --bind-to core --map-by core`; walker-check confirmed `IndependentWalkers=96`; `W=14` measured at 157.1s, over cap; `W=10` baseline (100 sites) measured at 27.7s for scale — single NUMA node, no cross-socket effects to check (unlike Rikyu's dual-socket Grace) |
+| R-CCS Cloud `rikyu` (GB200 NVL4, Grace CPU) | 144 (2× Neoverse-V2 Grace sockets, 72 each) | `nvc`/NVPL `_seq` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 112.7s (internal timer — see Golden Rule; wall-clock on this machine includes ~90s of unrelated MPI-startup noise and should never be used) | **This is the machine that prompted the Golden Rule above** — an entire investigation chasing an apparent "2.4x slower than `qc-gh200`" gap (tried: removing IB transport, single/dual-socket pinning, `core`/`l3cache`/`socket` rank mapping, NVPL vs. system OpenBLAS, `nvc` vs. GCC) never found a real compute problem because there wasn't one: every fix was incidentally reducing MPI-startup noise (UCX InfiniBand-registration retries, `mlx5dv_devx_alloc_uar ... Cannot allocate memory`, a `PF_LOG_BAR_SIZE` firmware limit) counted by wall-clock `time`, not real compute time. `UCX_IB_MLX5_DEVX=n` (forces UCX's older, non-DEVX ibverbs path) clears the warning without fixing the startup delay itself, but is confirmed **safe for genuine multi-node use** — a real 2-node/288-rank `W=10` run completed correctly with it set (22.97s internal timer, walker-check confirmed `IndependentWalkers=288`), nearly identical to the single-node `W=10` baseline (22.13s), showing no cross-node slowdown. `--bind-to core --map-by core` is required (default placement is measurably worse, consistent with `fx700`'s binding requirement). `W=14` measured at 277.4s, well over cap. Walker-check confirmed `IndependentWalkers=144` throughout. |
 
-Peak per-rank memory on all five machines stayed in the ~100-200MB range
+Peak per-rank memory on all six machines with completed sizing searches
+stayed in the ~100-200MB range
 at these sizes — nowhere near any machine's actual memory budget per
 core. Confirms time, not memory, is the binding constraint at sizes
 practical to benchmark quickly.

@@ -1,6 +1,6 @@
 ---
 name: mvmc-build
-description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, the R-CCS Cloud qc-gh200 (NVIDIA Grace Hopper) partition, the R-CCS Cloud genoa (AMD EPYC) partition, or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
+description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, the R-CCS Cloud qc-gh200 (NVIDIA Grace Hopper) partition, the R-CCS Cloud genoa (AMD EPYC) partition, RIKYU (GB200 NVL4), or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
 ---
 
 # Building mVMC
@@ -11,9 +11,9 @@ files work, see the **mvmc-reference** skill. For generating benchmark
 largest-problem-size-per-machine methodology and recorded results, see
 **mvmc-benchmarking**.
 
-Both recipes below are independently verified (built, ran, produced
+All recipes below are independently verified (built, ran, produced
 correct output matching `fom`'s expected `zvo_CalcTimer.dat` format) as of
-this writing. Both need `--recursive` on the clone — mVMC pulls in
+this writing. All need `--recursive` on the clone — mVMC pulls in
 StdFace, blis, and pfapack as git submodules.
 
 ```sh
@@ -35,8 +35,9 @@ distinguished the broken case from the working ones — see
 **mvmc-benchmarking** for the full story and why this invalidated an
 earlier recorded result.
 
-The fix applied here (verified working on `qc-gh200`, `ng-dgx-m2`, and
-`fx700` — same source tree, same patch, just rebuilt per-machine) adds one
+The fix applied here (verified working on `qc-gh200`, `ng-dgx-m2`, `fx700`,
+`genoa`, and Rikyu — same patch, just rebuilt per-machine on each one's own
+source tree) adds one
 small, self-contained block to `src/mVMC/vmcmain.c`, right after mVMC's
 own MPI communicator split (so it correctly accounts for `NSplitSize`,
 not just raw rank count — `size2` there is the true count of *independent
@@ -251,8 +252,7 @@ cmake -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_Fortran_COMPILER=g
 make -j$(nproc)
 ```
 
-- **`find_package(BLAS)` finds nothing here without help** — unlike Rikyu
-  (where a system `libblas.so` alternative pointed at OpenBLAS) or DGX
+- **`find_package(BLAS)` finds nothing here without help** — unlike DGX
   Spark/qc-gh200 (where the `nvhpc` module's NVPL libraries auto-resolve),
   this Rocky Linux image has no generic `libblas.so`/`liblapack.so`
   symlink at all, only FlexiBLAS (`libflexiblas.so.3`) and a raw
@@ -261,18 +261,82 @@ make -j$(nproc)
   symbol sets in one library) — passing it to only one variable leaves
   some targets (`UHF`, `greenr2k`) with unresolved symbols at link time,
   the same "DSO missing from command line" failure mode seen when
-  under-specifying NVPL on Rikyu.
+  under-specifying NVPL on Rikyu. (Rikyu's own compute image, by
+  contrast, *does* have a generic `libblas.so` alternative that
+  auto-resolves to system OpenBLAS's pthread-threaded build — an initial
+  build there used it by default before being switched to NVPL for
+  consistency with the other machines. `OPENBLAS_NUM_THREADS=1` was
+  tested against the pthread variant during that investigation and made
+  no measurable difference, so — unlike what might be assumed — its
+  threading model was not actually the source of any real slowdown; see
+  mvmc-benchmarking's rikyu row for the full story.)
 - No AMD AOCL is installed on this image — FlexiBLAS's default backend is
   OpenBLAS's **OpenMP**-threaded build (`OPENBLAS-OPENMP`, confirmed via
-  `flexiblas list`), not the pthread-threaded variant that caused a real
-  problem on Rikyu (see mvmc-benchmarking) — this repo's standard
-  `OMP_NUM_THREADS=1` correctly throttles it, no extra env var needed.
+  `flexiblas list`), not a pthread-threaded variant — this repo's
+  standard `OMP_NUM_THREADS=1` correctly throttles it, no extra env var
+  needed.
 - No dual-runtime risk here at all — there's no vendor compiler in the
   mix (plain `gcc`/`g++`/`gfortran` throughout), so unlike DGX Spark/qc-gh200
   there's nothing to avoid; `ldd` shows a single `libgomp.so.1`.
 - `mpirun` confirmed working (bundled Open MPI 3.1 under
   `mpi/openmpi-x86_64`); `srun` not tested here — check both per
   mvmc-benchmarking's methodology before assuming either works.
+- Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
+
+## RIKYU (GB200 NVL4, Grace CPU)
+
+GB200 NVL4 node: 2× Grace CPU sockets (Neoverse-V2, 72 cores each, 144
+total, single NUMA node per socket), Rocky Linux, aarch64. Pure CPU code
+— GPUs present (4× B200/node) but unused; request `--gpus=4` anyway since
+node/CPU allocation is derived from GPU count on this machine (see the
+`rikyu-hpc` skill's job-submission mechanics), not because the code needs
+them.
+
+```sh
+module load nvhpc/26.3
+cd mVMC && mkdir build && cd build
+NVPL=/shared/software/hpc_sdk/Linux_aarch64/26.3/math_libs/nvpl
+LIBS="$NVPL/lib/libnvpl_lapack_lp64_seq.so;$NVPL/lib/libnvpl_blas_lp64_seq.so"
+cmake -DCMAKE_C_COMPILER=nvc -DCMAKE_CXX_COMPILER=nvc++ -DCMAKE_Fortran_COMPILER=nvfortran \
+      -DUSE_GEMMT=OFF -DCMAKE_BUILD_TYPE=Release \
+      -DBLAS_LIBRARIES="$LIBS" -DLAPACK_LIBRARIES="$LIBS" ..
+make -j$(nproc)
+```
+
+- **Use NVIDIA's own `nvc`/`nvc++`/`nvfortran` here, not GCC** — the
+  opposite advice from DGX Spark/qc-gh200. The reason those machines
+  avoid NVHPC's compilers is a dual-OpenMP-runtime conflict with NVPL's
+  `_gomp`-suffixed (GNU-ABI) libraries; here, using NVPL's **`_seq`**
+  (single-threaded, no OpenMP runtime at all) variant instead sidesteps
+  that conflict entirely, so `nvc` is safe — confirmed via `ldd` showing
+  only `libnvomp.so` (NVIDIA's own runtime), no `libgomp.so` mixed in. A
+  GCC + NVPL `_gomp` build also works and measured identically (both
+  ~53s on a `W=10`/single-socket timing probe) — `nvc`/`_seq` is not
+  faster, just equally valid and what's documented here as the verified
+  recipe.
+- Same `-DUSE_GEMMT=OFF` reasoning as elsewhere (avoid the
+  wrong-microarchitecture default BLIS download). Pass the NVPL library
+  to *both* `-DBLAS_LIBRARIES` and `-DLAPACK_LIBRARIES` (same pattern as
+  genoa's FlexiBLAS) — passing it to only one leaves some targets (`UHF`,
+  `greenr2k`) with unresolved symbols at link time.
+- **Running requires two flags, neither of which is a build concern but
+  both of which will silently wreck a run if skipped:**
+  `--bind-to core --map-by core` on `mpiexec`/`mpirun` (default placement
+  measurably worse — see mvmc-benchmarking), and `UCX_IB_MLX5_DEVX=n` in
+  the environment (works around a `PF_LOG_BAR_SIZE`-limited UAR allocation
+  failure — `mlx5dv_devx_alloc_uar(...) Cannot allocate memory` — that
+  otherwise fires on every rank at MPI startup; doesn't fix a real
+  compute problem, but does cut a large amount of noise from every run's
+  log and startup time). Confirmed safe for genuine multi-node jobs too
+  (not just a single-node workaround) — a real 2-node/288-rank run
+  completed correctly with it set, `zvo_walkercheck.dat` confirming
+  `IndependentWalkers=288`.
+- **Wall-clock `time` is unreliable on this machine even after the above
+  fixes** — MPI startup itself can take ~90s regardless, dwarfing the
+  actual compute for small problem sizes. This is a timing-methodology
+  issue, not a build one — see mvmc-benchmarking's Golden Rule for the
+  full story and why `zvo_CalcTimer.dat`'s `All` line is what to trust
+  instead.
 - Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
 
 ## Local macOS (Homebrew)
