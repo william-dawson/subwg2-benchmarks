@@ -38,23 +38,25 @@ point at the sources instead:
   https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
 - Community workflow/examples: https://github.com/issp-center-dev/mVMC-tutorial
 - Source: https://github.com/issp-center-dev/mVMC
-- Key papers, bundled in `papers/` alongside this file (full bibliography:
-  `mVMC` source's `doc/bib/userguide.bib`):
-  - `papers/misawa-2019-mvmc-software.pdf` — the software paper itself
-    (arXiv:1711.11418, published as *Comp. Phys. Commun.* **235**, 447-462
-    (2019) — cite this if publishing results). Has an authoritative
+- Key papers (**not bundled in this repo** — copyrighted, third-party
+  publications; don't commit copies here. Full bibliography: `mVMC`
+  source's `doc/bib/userguide.bib`):
+  - Misawa et al., "mVMC – Open-source software for many-variable
+    variational Monte Carlo method" — arXiv:1711.11418, published as
+    *Comp. Phys. Commun.* **235**, 447-462 (2019) — the software paper
+    itself; cite this if publishing results. Has an authoritative
     Parallelization section (§3.5) and Benchmark section (§4); several
     facts in this skill (the `NSplitSize`/MPI-vs-OpenMP mechanism, the
     S-matrix memory ceiling) are sourced from here, not just from source
     inspection.
-  - `papers/tahara-imada-2008-sr-method.pdf` — Tahara & Imada, *J. Phys.
-    Soc. Jpn.* **77**, 114701 (2008). The actual SR-method paper —
-    explains `NSROptItrStep`/`DSROptRedCut`/`DSROptStaDel` and the
-    quantum-number projection (`NQPFull`) machinery from first principles.
-  - `papers/wimmer-2012-pfapack.pdf` — Wimmer, *ACM Trans. Math. Software*
-    **38**, 30 (2012). PFAPACK itself — the algorithm behind `M_ZSKTRF` in
-    `CalculateMAll_fcmp`, i.e. the one OpenMP call site that's actually
-    well-suited to threading (see Parallelization below).
+  - Tahara & Imada, *J. Phys. Soc. Jpn.* **77**, 114701 (2008),
+    doi:10.1143/JPSJ.77.114701 — the actual SR-method paper — explains
+    `NSROptItrStep`/`DSROptRedCut`/`DSROptStaDel` and the quantum-number
+    projection (`NQPFull`) machinery from first principles.
+  - Wimmer, *ACM Trans. Math. Software* **38**, 30 (2012),
+    doi:10.1145/2331130.2331138 — PFAPACK itself — the algorithm behind
+    `M_ZSKTRF` in `CalculateMAll_fcmp`, i.e. the one OpenMP call site
+    that's actually well-suited to threading (see Parallelization below).
 
 ## Two run modes
 
