@@ -20,6 +20,77 @@ StdFace, blis, and pfapack as git submodules.
 git clone --recursive https://github.com/issp-center-dev/mVMC.git
 ```
 
+## Apply this patch before building, on every machine
+
+Stock mVMC has **no output anywhere — not stdout, not any `zvo_*.dat`
+file** — that reveals how many MPI ranks actually coordinated a run. This
+is a real gap, not a theoretical one: on `qc-gh200`, bare `srun -n 72
+./vmc.out` silently fell back to 72 independent single-rank processes (a
+known Open MPI behavior when the launcher doesn't wire up PMI/PMIx
+correctly for a given binary) — each one thought it was rank 0, all wrote
+over the same output files, and the result *looked* like a normal,
+clean 72-rank run. `mpirun` on the same machine and `srun --mpi=pmix_v3`
+were both genuinely coordinated. Nothing in mVMC's own output
+distinguished the broken case from the working ones — see
+**mvmc-benchmarking** for the full story and why this invalidated an
+earlier recorded result.
+
+The fix applied here (verified working on `qc-gh200`, `ng-dgx-m2`, and
+`fx700` — same source tree, same patch, just rebuilt per-machine) adds one
+small, self-contained block to `src/mVMC/vmcmain.c`, right after mVMC's
+own MPI communicator split (so it correctly accounts for `NSplitSize`,
+not just raw rank count — `size2` there is the true count of *independent
+walker-groups*, which only equals raw MPI rank count when `NSplitSize=1`,
+the default this repo always uses). It writes a small durable file,
+`zvo_walkercheck.dat`, in the run directory:
+
+```sh
+python3 << 'EOF'
+path = "mVMC/src/mVMC/vmcmain.c"
+with open(path) as f:
+    content = f.read()
+anchor = "  StopTimer(10);\n#endif"
+assert content.count(anchor) == 1
+new_block = anchor + '''
+
+  if(rank0==0) {
+    long totalWalkerSamples = (long)NVMCSample * (long)size2;
+    fprintf(stdout,"Independent walkers (MPI ranks / NSplitSize) = %d, total effective VMC samples = %ld x %d = %ld\\n",
+            size2, (long)NVMCSample, size2, totalWalkerSamples);
+    FILE *fpWalkerCheck = fopen("zvo_walkercheck.dat", "w");
+    if(fpWalkerCheck != NULL) {
+      fprintf(fpWalkerCheck, "NVMCSample %ld\\nMPI_ranks %d\\nNSplitSize %d\\nIndependentWalkers %d\\nTotalEffectiveSamples %ld\\n",
+              (long)NVMCSample, size0, NSplitSize, size2, totalWalkerSamples);
+      fclose(fpWalkerCheck);
+    }
+  }'''
+content = content.replace(anchor, new_block, 1)
+with open(path, 'w') as f:
+    f.write(content)
+EOF
+```
+
+Apply this once per cloned source tree, before the first `cmake`/`make` —
+it's a source patch, not a build flag, so it has to happen pre-build and
+persists across rebuilds of that tree (including multiple out-of-source
+`build-*/` dirs sharing one source checkout, e.g. DGX Spark's `build-gcc`
+and fx700's `build-fujitsu` both picked it up from one patch to the shared
+source). After every run, check `zvo_walkercheck.dat`:
+
+- `IndependentWalkers` must equal the rank count you actually launched
+  with (accounting for `NSplitSize`, which is 1 unless deliberately
+  changed).
+- `TotalEffectiveSamples` must equal `NVMCSample × IndependentWalkers`.
+- If `IndependentWalkers` is stuck at 1 (or anything less than your
+  launch's rank count) regardless of `-n <N>`, the launcher silently
+  fragmented into N independent single-rank processes — the run is not
+  measuring what you think it's measuring. Don't trust its timing.
+
+This is now a required step before recording any new machine's results in
+**mvmc-benchmarking** — every launcher/rank-count combination should be
+spot-checked against this file at least once before its timing is
+trusted.
+
 ## R-CCS Cloud, DGX Spark (`ng-dgx-m0`-`ng-dgx-m3`)
 
 Pure CPU code — DGX Spark was chosen for queue availability, not GPU need

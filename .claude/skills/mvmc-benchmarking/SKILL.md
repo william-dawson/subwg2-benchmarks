@@ -68,30 +68,55 @@ Deployment is fixed first, size is searched second — don't invert this:
    new machine; don't assume either outcome.
 7. **Check both `srun` and `mpirun`, on each new machine — don't assume
    `mpirun` is universal.** DGX Spark and `fx700`'s bundled Open MPI lack
-   Slurm PMI support, so `srun` fails outright there and `mpirun` is the
-   only option (see mvmc-build). `qc-gh200`'s newer bundled MPI (HPC-X
-   2.50) supports both — and there, `srun` was consistently ~25% faster
-   than `mpirun` (19.3s vs. 25.8s on a `W=10`/72-rank run), with neither
-   `--bind-to core --map-by core` nor `--mca plm slurm` closing the gap
-   (both left `mpirun` at ~26s). Where `srun` works, prefer it as the
-   default and only fall back to `mpirun` where `srun` is confirmed
-   broken — don't default to `mpirun` everywhere just because that's what
-   two of three machines so far have required.
+   Slurm PMI support, so `srun` fails outright there (loud, immediate
+   error) and `mpirun` is the only option (see mvmc-build).
+
+   On `qc-gh200`, bare `srun -n 72 ./vmc.out` did *not* fail loudly — it
+   silently fell back to 72 independent single-rank processes (a known
+   Open MPI behavior when PMI/PMIx isn't wired up for a given binary),
+   each believing it was rank 0, all racing to write the same output
+   files. This produced a clean-looking, plausible result (~19-22s) that
+   was actually just single-rank speed, and was originally mistaken for
+   "`srun` is 25% faster than `mpirun`" — it wasn't; it wasn't measuring
+   72 ranks at all. `srun --mpi=pmix_v3 -n 72` (the correct explicit
+   invocation) and `mpirun -n 72` are both genuinely coordinated on this
+   machine and give essentially identical numbers (~21-22s). This is
+   exactly why point 8 (below) is now mandatory before trusting any
+   launcher/rank-count combination on a new machine — a clean output file
+   does not by itself prove real coordination happened.
+8. **Verify real MPI coordination before trusting any timing, on every
+   machine.** Apply the source patch documented in **mvmc-build**'s
+   "Apply this patch before building, on every machine" section, then
+   check `zvo_walkercheck.dat` after every run: `IndependentWalkers` must
+   equal the rank count you launched with, and `TotalEffectiveSamples`
+   must equal `NVMCSample × IndependentWalkers`. This is a standing
+   requirement now, not a one-off fix for the `qc-gh200` bug — a launcher
+   can silently fragment into N independent single-rank processes on any
+   machine, produce a perfectly clean-looking output file, and give a
+   plausible timing number that isn't measuring what you think it is.
+   Confirmed working (and confirmed the recorded results were already
+   genuine) on `qc-gh200`, DGX Spark, and `fx700` — see each machine's row
+   below.
 
 ## Recorded results
 
 All results use `benchgen mvmc create --w N --l N` (defaults otherwise:
 half filling, `NVMCSample=4000`, `NSROptItrStep=1`), `OMP_NUM_THREADS=1`,
-one MPI rank per core. Launcher varies by machine — see methodology point
-7 and each machine's row below; check mvmc-build for what a given
-machine's bundled MPI actually supports.
+one MPI rank per core. Launcher varies by machine — see methodology
+points 7-8 and each machine's row below; check mvmc-build for what a
+given machine's bundled MPI actually supports. Every row below has been
+spot-checked against `zvo_walkercheck.dat` (methodology point 8) —
+`IndependentWalkers` matched the intended rank count in every case,
+including DGX Spark and `fx700`, which were re-verified retroactively
+after the `qc-gh200` bug was found and turned out to have been genuine
+all along.
 
 | Machine | Cores | Build | Size | Wall time | Notes |
 |---|---|---|---|---|---|
-| R-CCS Cloud DGX Spark (`ng-dgx-m2`) | 20 (10 Cortex-X925 + 10 Cortex-A725) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 125.3s | `mpirun` (`srun` unsupported); `W=14` measured at 152s, over cap; binding flags retested and confirmed no-op (127.7s vs. 126.3s) |
+| R-CCS Cloud DGX Spark (`ng-dgx-m2`) | 20 (10 Cortex-X925 + 10 Cortex-A725) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 125.3s | `mpirun` (`srun` unsupported); `W=14` measured at 152s, over cap; binding flags retested and confirmed no-op (127.7s vs. 126.3s); walker-check re-verified at 130.3s, `IndependentWalkers=20` as expected |
 | Local Mac (Apple M4) | 10 (4P + 6E) | GCC-16 + Accelerate (mvmc-build recipe) | `W=12, L=12` (144 sites) | 73.3s | `mpirun` (only launcher available); `W=13` measured at ~150s, over cap |
-| R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | `mpirun` (`srun` unsupported); requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11` |
-| R-CCS Cloud `qc-gh200` (NVIDIA Grace Hopper) | 72 (Neoverse-V2) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 105.3s | `srun` (faster than `mpirun` here, see methodology point 7); `W=14` measured at 264.5s — over 2x the cap, a much steeper jump than the other machines saw between adjacent sizes, plausibly memory-bandwidth contention across 72 ranks on one socket; `W=10` baseline (100 sites) measured at 22.2s for scale |
+| R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | `mpirun` (`srun` unsupported); requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11`; walker-check re-verified at 155.1s, `IndependentWalkers=48` as expected |
+| R-CCS Cloud `qc-gh200` (NVIDIA Grace Hopper) | 72 (Neoverse-V2) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 108.2s | `mpirun` (bare `srun` is broken here — see methodology point 7; `srun --mpi=pmix_v3` also works and gives the same ~equivalent numbers, but `mpirun` needs no extra flag); walker-check confirmed `IndependentWalkers=72`; `W=14` re-measured at 269s — over 2x the cap, a much steeper jump than the other machines saw between adjacent sizes, plausibly memory-bandwidth contention across 72 ranks on one socket; `W=10` baseline (100 sites) measured at 22.2s for scale |
 
 Peak per-rank memory on all four machines stayed in the ~100-200MB range
 at these sizes — nowhere near any machine's actual memory budget per
