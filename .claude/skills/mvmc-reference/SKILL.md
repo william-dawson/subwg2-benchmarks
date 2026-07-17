@@ -88,24 +88,115 @@ trying to draw scaling conclusions from a benchmark.
   "the number of processes of MPI parallelization") is the actual knob that
   would make ranks split a single chain's sampling work — untested in this
   project so far.
-- **OpenMP never touches the Markov chain loop itself.** The core
-  Metropolis loop (`for(outStep...) for(inStep...) { CalculateNewPfM2(...);
-  ... }` in `vmcmake.c`) is plain serial C — necessarily so, since each
-  step depends on the accepted configuration from the previous one.
-  `#pragma omp parallel for` only appears on (a) a few one-time array-reset
-  loops outside that loop, and (b) inside the BLAS/LAPACK calls the loop
-  invokes per step for Pfaffian/matrix updates. So OpenMP's only possible
-  benefit is threaded BLAS inside each step's matrix update — and if the
-  matrices are small relative to per-call thread-spawn overhead (true for
-  small-to-moderate `W`/`L` in testing so far), adding threads makes things
-  *slower*, not faster, dominated by kernel-level thread scheduling
-  overhead. Default to `OMP_NUM_THREADS=1` unless you've specifically
-  confirmed a larger benefit at your problem size.
+- **The Markov chain walk itself is serial**, necessarily so (each step
+  depends on the accepted configuration from the previous one) — but three
+  different functions called from inside that walk *do* use
+  `#pragma omp parallel for`, all over the same `qpidx` loop
+  (`NQPFull`, 8 by default), with very different work-per-call vs.
+  call-frequency tradeoffs:
+
+  | Function | Per-call cost | Called | Effect of threading |
+  |---|---|---|---|
+  | `CalculateNewPfM2` (`pfupdate.c`) | O(`Nsize`) | every trial move (~`NVMCSample·Nsite` times/step) | overhead-dominated, hurts |
+  | `UpdateMAll` (`pfupdate.c`) | O(`Nsize²`) | every accepted move (~half of trials) | still overhead-dominated, hurts |
+  | `CalculateMAll_fcmp` (`matrix.c`, via PFAPACK's `M_ZSKTRF`) | O(`Nsize³`) | once per SR step, **plus** a periodic from-scratch recompute every time accepted moves since the last one exceed `Nsite` (`if(nAccept>Nsite)` in `vmcmake.c`) — so really ~`0.5·NVMCSample` times/step | genuinely benefits from threading, up to 8-way |
+
+  Net effect measured so far (DGX Spark, Mac, multiple `W`/`L`): total wall
+  time gets *worse* with more `OMP_NUM_THREADS`, because the first two
+  functions are invoked far more often than the third and their overhead
+  dominates. This is not "mVMC doesn't use OpenMP well" — one of the three
+  call sites is doing exactly the right thing; it's just outweighed.
 - **Practical guidance for this project so far**: use MPI ranks for more
-  statistics per wall-clock second, not for speed. Don't assume OpenMP
-  threading helps without measuring at your specific `W`/`L` — the
-  "linear-algebra-heavy enough to be worth threading" crossover has not yet
-  been found empirically for any size tested to date.
+  statistics per wall-clock second, not for speed (see above — ranks don't
+  reduce wall time by default either). Default to `OMP_NUM_THREADS=1`
+  unless you've specifically measured a benefit at your problem size — no
+  configuration tested so far (several `W`/`L` values up to `14×14`, two
+  different machines, two different compiler/BLAS stacks) has shown net
+  positive OpenMP scaling. In principle a large enough `Nsize` should tip
+  the balance toward `CalculateMAll`'s O(`Nsize³`) term dominating, but
+  that crossover hasn't been located, and per the tutorial material below,
+  real mVMC problem sizes (100-1000 sites) go well beyond anything tested
+  here — so this is a real open question, not a closed one.
+
+## How big are real problems, and how do people scale up?
+
+Sourced from https://github.com/issp-center-dev/mVMC-tutorial (hands-on
+slides and sample scripts, 2017-2024) — this is the actual community
+workflow, not just the manual's parameter reference.
+
+- **The whole point of mVMC is to go past what exact diagonalization can
+  reach.** HΦ (the companion exact-diagonalization code from the same
+  group) tops out around **~40 sites** — exponential Hilbert-space growth.
+  mVMC's own stated target range is **~100-1000 sites**, with published
+  applications using `>10⁴` variational parameters (2024 tutorial slides).
+  Anything you can exactly diagonalize is a *validation* case, not a
+  target size.
+- **The standard workflow is finite-size scaling, not one fixed problem
+  size**: (1) pick a small lattice small enough for HΦ to exactly
+  diagonalize the same Hamiltonian, (2) run mVMC on it with your intended
+  settings (model, `NVMCSample`, `NSROptItrStep`, sublattice symmetry) and
+  confirm the optimized energy matches HΦ's exact answer, (3) rerun the
+  *identical* recipe at increasing `W`/`L` — the tutorial literally shows
+  this as "copy the directory, edit one number" (`L4_1D_Heisenberg` →
+  `L8_1D_Heisenberg` → ...) — up to whatever size the compute budget
+  allows, (4) extrapolate physical quantities across the whole size
+  sequence toward the thermodynamic limit. There is no single "the"
+  problem size in real usage; there's a validated small case and a
+  sequence of production sizes analyzed together.
+- **Real convergence needs many SR steps, not one.** The tutorial's own
+  worked examples use `NVMCSample=200` with `NSROptItrStep=600` — a nearly
+  inverted ratio from this repo's CLI defaults (`NVMCSample=4000`,
+  `NSROptItrStep=1`). That's not a discrepancy to fix: this repo's tool is
+  a *throughput* benchmark (one step is fully representative of every
+  other step's cost, see the FOM discussion below), not a physics
+  calculation — but if anyone asks what a real, convergent run looks like,
+  it looks like the tutorial's numbers, not this tool's defaults. People
+  judge convergence by plotting energy (`xxx_out_yyy.dat`) vs. SR step and
+  watching it plateau, and judge accuracy from the variance column
+  (`(⟨H²⟩-⟨H⟩²)/⟨H⟩²`, which → 0 only for an exact eigenstate — VMC is not
+  exact, so it stays small but finite).
+- **Sublattice symmetry (`Wsub`/`Lsub`) is used aggressively even at small
+  sizes** — e.g. `Wsub=Lsub=2` on a 4×4 lattice in the tutorial's own
+  examples — specifically to cap the number of independent variational
+  parameters (and thus the `O(Nparam²)` SR-solve memory/cost) as `W`/`L`
+  grow. This repo's CLI currently always defaults `Wsub=W`, `Lsub=L` (no
+  reduction) — worth knowing that's not how real large-scale runs are
+  typically configured.
+- **A full research calculation is three steps**, only the first of which
+  this repo's benchmark generator exercises: (1) optimize the wavefunction
+  (`NVMCCalMode=0`, what `benchgen mvmc create` targets), (2) recompute
+  one- and two-body Green's functions on the optimized wavefunction
+  (`NVMCCalMode=1`, needs `zqp_opt.dat` from step 1 as input), (3)
+  Fourier-transform those into physical observables (structure factors,
+  correlation functions) via the `fourier`/`greenr2k` utility (chapter 9 of
+  the manual) or post-processing scripts. Worth knowing when deciding
+  whether a benchmark that only does step 1 is representative enough of
+  what a real user's wall-clock time is actually spent on.
+
+## Memory
+
+The two things that actually blow up memory are the per-rank Pfaffian
+arrays (`O(NQPFull · Nsize²)`) and the SR method's `Nparam × Nparam`
+S-matrix. Documented/verified levers, roughly in the order people reach
+for them:
+
+- **`NSRCG=1`** — solves `S·x=g` iteratively (conjugate gradient) instead
+  of explicitly forming and factoring the S-matrix. Manual: reduces memory
+  from `O(Np²)+O(Np·N_MCS)` to `O(Np)+O(Np·N_MCS)`. Pure memory win, more
+  CG iterations in exchange.
+- **`NStore=0`** — the default (`NStore=1`) caches `⟨O_k O_l⟩` products as
+  an explicit matrix for speed, costing `O(Np²)+O(Np·N_MCS)`; turning it
+  off drops back to `O(Np²)` at a speed cost.
+- **`Wsub`/`Lsub` sublattice symmetry** — directly shrinks `Nparam` without
+  shrinking the physical lattice (see above) — the standard way real large
+  runs stay tractable, not just a memory-crisis fallback.
+- **Build with `-DUSE_SCALAPACK=ON`** — distributes the S-matrix solve
+  (`stcopt_pdposv.c`, ScaLAPACK's `pdposv`) across MPI ranks via BLACS
+  block-cyclic layout instead of replicating it on every rank. This is the
+  "add more nodes to fit a bigger problem" lever, and unlike the default
+  `NSplitSize=1` MPI behavior (redundant independent chains, no memory
+  sharing — see parallelization above), it genuinely reduces per-rank
+  memory for the dominant term.
 
 ## Output files (in the `output/` directory)
 
