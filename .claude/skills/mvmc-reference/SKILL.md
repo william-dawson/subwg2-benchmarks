@@ -11,15 +11,31 @@ lattice, or Heisenberg spin) via the Stochastic Reconfiguration (SR)
 method, using Markov-chain Monte Carlo sampling for expectation values.
 Source: https://github.com/issp-center-dev/mVMC.
 
-This skill covers the code itself — input keywords, parallelization
-semantics, output formats. For actually building the binary, see the
-**mvmc-build** skill. For generating benchmark `.inp` files, see the
-**benchmark-generator** skill.
+This repo keeps three kinds of mVMC knowledge deliberately separate —
+don't blend them:
 
-A copy of the official PDF manual (v1.2.0) ships alongside this file at
-`mVMC-1.2.0_en.pdf` — page-cite it for anything below. For newer syntax or
-anything this pinned copy doesn't cover, use the live manual:
-https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
+- **This skill (mvmc-reference)**: what the code *is* and how it behaves —
+  physics, input keywords, parallelization semantics, output formats.
+- **benchmark-generator skill**: the CLI in this repo for generating
+  `.inp`/job-script files.
+- **mvmc-build skill** (and any future run/monitor tooling): building and
+  executing the binary on a cluster.
+
+**Important framing**: this repo's benchmark generator measures raw code
+*throughput*, not physics. Real research runs use very different settings
+(many SR steps, sublattice symmetry, particular fillings chosen for the
+physics question at hand — see below) — that's expected and correct, not
+something the generator should be made to imitate. Realistic-condition
+knowledge below exists so you can *explain* the code accurately, not to
+motivate changing the generator's defaults to match it.
+
+For anything not covered here, don't try to reconstruct it from memory —
+point at the sources instead:
+- Official manual (v1.2.0 PDF, bundled alongside this file as
+  `mVMC-1.2.0_en.pdf`; page-cite it) or the live version for newer syntax:
+  https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
+- Community workflow/examples: https://github.com/issp-center-dev/mVMC-tutorial
+- Source: https://github.com/issp-center-dev/mVMC
 
 ## Two run modes
 
@@ -120,83 +136,42 @@ trying to draw scaling conclusions from a benchmark.
 
 ## How big are real problems, and how do people scale up?
 
-Sourced from https://github.com/issp-center-dev/mVMC-tutorial (hands-on
-slides and sample scripts, 2017-2024) — this is the actual community
-workflow, not just the manual's parameter reference.
+Background context for explaining the code accurately — not a spec for
+what this repo's benchmarks should look like. Full detail:
+https://github.com/issp-center-dev/mVMC-tutorial (hands-on slides and
+sample scripts, 2017-2024).
 
-- **The whole point of mVMC is to go past what exact diagonalization can
-  reach.** HΦ (the companion exact-diagonalization code from the same
-  group) tops out around **~40 sites** — exponential Hilbert-space growth.
-  mVMC's own stated target range is **~100-1000 sites**, with published
-  applications using `>10⁴` variational parameters (2024 tutorial slides).
-  Anything you can exactly diagonalize is a *validation* case, not a
+- mVMC's reason to exist is going past what exact diagonalization (HΦ, the
+  companion code from the same group) can reach — HΦ tops out around
+  **~40 sites**; mVMC's own stated target is **~100-1000 sites**
+  (`>10⁴` variational parameters in published applications). Anything
+  small enough to exactly diagonalize is a validation case there, not a
   target size.
-- **The standard workflow is finite-size scaling, not one fixed problem
-  size**: (1) pick a small lattice small enough for HΦ to exactly
-  diagonalize the same Hamiltonian, (2) run mVMC on it with your intended
-  settings (model, `NVMCSample`, `NSROptItrStep`, sublattice symmetry) and
-  confirm the optimized energy matches HΦ's exact answer, (3) rerun the
-  *identical* recipe at increasing `W`/`L` — the tutorial literally shows
-  this as "copy the directory, edit one number" (`L4_1D_Heisenberg` →
-  `L8_1D_Heisenberg` → ...) — up to whatever size the compute budget
-  allows, (4) extrapolate physical quantities across the whole size
-  sequence toward the thermodynamic limit. There is no single "the"
-  problem size in real usage; there's a validated small case and a
-  sequence of production sizes analyzed together.
-- **Real convergence needs many SR steps, not one.** The tutorial's own
-  worked examples use `NVMCSample=200` with `NSROptItrStep=600` — a nearly
-  inverted ratio from this repo's CLI defaults (`NVMCSample=4000`,
-  `NSROptItrStep=1`). That's not a discrepancy to fix: this repo's tool is
-  a *throughput* benchmark (one step is fully representative of every
-  other step's cost, see the FOM discussion below), not a physics
-  calculation — but if anyone asks what a real, convergent run looks like,
-  it looks like the tutorial's numbers, not this tool's defaults. People
-  judge convergence by plotting energy (`xxx_out_yyy.dat`) vs. SR step and
-  watching it plateau, and judge accuracy from the variance column
-  (`(⟨H²⟩-⟨H⟩²)/⟨H⟩²`, which → 0 only for an exact eigenstate — VMC is not
-  exact, so it stays small but finite).
-- **Sublattice symmetry (`Wsub`/`Lsub`) is used aggressively even at small
-  sizes** — e.g. `Wsub=Lsub=2` on a 4×4 lattice in the tutorial's own
-  examples — specifically to cap the number of independent variational
-  parameters (and thus the `O(Nparam²)` SR-solve memory/cost) as `W`/`L`
-  grow. This repo's CLI currently always defaults `Wsub=W`, `Lsub=L` (no
-  reduction) — worth knowing that's not how real large-scale runs are
-  typically configured.
-- **A full research calculation is three steps**, only the first of which
-  this repo's benchmark generator exercises: (1) optimize the wavefunction
-  (`NVMCCalMode=0`, what `benchgen mvmc create` targets), (2) recompute
-  one- and two-body Green's functions on the optimized wavefunction
-  (`NVMCCalMode=1`, needs `zqp_opt.dat` from step 1 as input), (3)
-  Fourier-transform those into physical observables (structure factors,
-  correlation functions) via the `fourier`/`greenr2k` utility (chapter 9 of
-  the manual) or post-processing scripts. Worth knowing when deciding
-  whether a benchmark that only does step 1 is representative enough of
-  what a real user's wall-clock time is actually spent on.
+- The community workflow is finite-size scaling: validate a small lattice
+  against HΦ, then rerun the same recipe at increasing `W`/`L`,
+  extrapolating physical quantities across the whole size sequence — not
+  one fixed "the" problem size. Real convergence also uses many more SR
+  steps than a throughput benchmark needs (tutorial examples: `NVMCSample
+  ~200`, `NSROptItrStep ~600`), and sublattice symmetry (`Wsub`/`Lsub`) to
+  keep the SR method's parameter count tractable as size grows.
+- A full research calculation is 3 steps — optimize (`NVMCCalMode=0`),
+  compute Green's functions on the optimized wavefunction
+  (`NVMCCalMode=1`), then Fourier-transform those into physical
+  observables (manual ch. 9, `fourier`/`greenr2k`). This repo's generator
+  only targets the first step, by design (see framing note above).
 
 ## Memory
 
-The two things that actually blow up memory are the per-rank Pfaffian
-arrays (`O(NQPFull · Nsize²)`) and the SR method's `Nparam × Nparam`
-S-matrix. Documented/verified levers, roughly in the order people reach
-for them:
-
-- **`NSRCG=1`** — solves `S·x=g` iteratively (conjugate gradient) instead
-  of explicitly forming and factoring the S-matrix. Manual: reduces memory
-  from `O(Np²)+O(Np·N_MCS)` to `O(Np)+O(Np·N_MCS)`. Pure memory win, more
-  CG iterations in exchange.
-- **`NStore=0`** — the default (`NStore=1`) caches `⟨O_k O_l⟩` products as
-  an explicit matrix for speed, costing `O(Np²)+O(Np·N_MCS)`; turning it
-  off drops back to `O(Np²)` at a speed cost.
-- **`Wsub`/`Lsub` sublattice symmetry** — directly shrinks `Nparam` without
-  shrinking the physical lattice (see above) — the standard way real large
-  runs stay tractable, not just a memory-crisis fallback.
-- **Build with `-DUSE_SCALAPACK=ON`** — distributes the S-matrix solve
-  (`stcopt_pdposv.c`, ScaLAPACK's `pdposv`) across MPI ranks via BLACS
-  block-cyclic layout instead of replicating it on every rank. This is the
-  "add more nodes to fit a bigger problem" lever, and unlike the default
-  `NSplitSize=1` MPI behavior (redundant independent chains, no memory
-  sharing — see parallelization above), it genuinely reduces per-rank
-  memory for the dominant term.
+The two things that blow up memory: per-rank Pfaffian arrays
+(`O(NQPFull·Nsize²)`) and the SR method's `Nparam × Nparam` S-matrix.
+Four documented/verified levers exist — `NSRCG=1` (iterative solve instead
+of forming the S-matrix), `NStore=0` (drop the cached `⟨O_kO_l⟩` matrix,
+trade speed for memory), `Wsub`/`Lsub` sublattice symmetry (shrinks
+`Nparam` directly), and building with `-DUSE_SCALAPACK=ON` (distributes
+the S-matrix solve — `stcopt_pdposv.c`, ScaLAPACK's `pdposv` — across MPI
+ranks via BLACS instead of replicating it on every rank, unlike the
+default `NSplitSize=1` MPI behavior above). See manual §4.5 (`NSRCG`,
+`NStore`) and §2.2 (ScaLAPACK build) for exact semantics and flags.
 
 ## Output files (in the `output/` directory)
 

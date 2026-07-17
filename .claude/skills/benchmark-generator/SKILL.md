@@ -10,6 +10,11 @@ generates benchmark inputs for the mVMC and SALMON codes (and computes a
 figure of merit from their output). There is no need to write ad-hoc Python
 or notebooks for this — always drive it through the CLI.
 
+This skill covers CLI mechanics only — flags, defaults, what gets written
+where. For what the physics/algorithm parameters actually mean, what
+realistic values look like, or why a default was chosen, see the
+**mvmc-reference** skill instead of guessing here.
+
 Run everything with `uv run`, from the repo root (the directory containing
 `pyproject.toml`). `uv run` will create the virtualenv and install
 dependencies (`ase`, `f90nml`, `typer`) automatically on first use — no
@@ -28,11 +33,15 @@ uv run benchgen mvmc create --w 18 --l 18
 Writes `output/mVMC-{w}-{l}.inp` and `output/mVMC-{w}-{l}.sh` (a PJM job
 script that runs `vmc.out` on Fugaku). Key options: `--w`/`--l` (lattice
 size), `--wsub`/`--lsub` (sublattice size), `--u` (interaction strength),
-`--t` (hopping), `--ncond`, `--nvmc-sample`. Job-script options
-(`--node`, `--rscgrp`, `--elapse`, `--group`, `--omp-num-threads`,
-`--max-proc-per-node`) control the PJM directives — `--group` in particular
-is a project accounting code the user will usually need to supply.
-Run `uv run benchgen mvmc create --help` for the full list and defaults.
+`--t` (hopping), `--nvmc-sample`. Job-script options (`--node`, `--rscgrp`,
+`--elapse`, `--group`, `--omp-num-threads`, `--max-proc-per-node`) control
+the PJM directives — `--group` in particular is a project accounting code
+the user will usually need to supply. Run `uv run benchgen mvmc create
+--help` for the full list and defaults.
+
+There is **no `--ncond`/`--nelec` option** — electron filling is always
+fixed at half filling internally, scaled automatically from `--w`/`--l`;
+it's not user-configurable (see mvmc-reference for why).
 
 ## Generating a SALMON case
 
