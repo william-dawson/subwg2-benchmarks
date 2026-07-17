@@ -1,6 +1,6 @@
 ---
 name: mvmc-build
-description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]) or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on either of these targets.
+description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
 ---
 
 # Building mVMC
@@ -74,6 +74,57 @@ Non-obvious points, in order of how much they'll bite you:
   the PMI failure are separate issues, only the latter is fatal).
 - Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`,
   `build/src/ComplexUHF/UHF`.
+
+## R-CCS Cloud, fx700 (Fujitsu A64FX)
+
+Fujitsu A64FX, aarch64, Rocky Linux, 48 cores, InfiniBand EDR, 32GB/node.
+Build **natively on an `fx700` node itself** — the docs describe `r340` as
+"the cross-compilation environment for fx700", but as of this writing the
+Fujitsu toolchain (`FJSVstclanga` module) isn't actually present on `r340`
+(the module loads with no error, but the directory it points at doesn't
+exist there); it *is* present and working directly on `fx700` nodes, which
+have plenty of cores to self-host a build. Worth rechecking if `r340`
+ever gets the toolchain installed, since native aarch64 compiles are
+slower per-object than x86_64 cross-compiling would be.
+
+```sh
+module load system/fx700 FJSVstclanga
+cd mVMC && mkdir build && cd build
+cmake -DCMAKE_C_COMPILER=mpifcc -DCMAKE_CXX_COMPILER=mpiFCC -DCMAKE_Fortran_COMPILER=mpifrt \
+      -DCMAKE_C_FLAGS_RELEASE='-Kfast,parallel -Kmemalias,alias_const' \
+      -DCMAKE_Fortran_FLAGS_RELEASE='-DFUJITSU -Kfast,parallel' \
+      -DOpenMP_C_FLAGS='-Kopenmp' \
+      -DCMAKE_EXE_LINKER_FLAGS='-Kopenmp -Kparallel' \
+      -DBLAS_LIBRARIES='-SSL2' -DLAPACK_LIBRARIES='-SSL2' \
+      -DUSE_GEMMT=OFF -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+```
+
+- **Compiler names have no `px` suffix here.** mVMC's own `config/fujitsu.cmake`
+  and `config/fugaku.cmake` presets use `mpifccpx`/`mpiFCCpx`/`mpifrtpx` —
+  that `px` suffix is the Fugaku/K-computer cross-compile naming
+  convention (build on an x86_64 front-end, target the A64FX compute
+  nodes). Since we're compiling natively on an A64FX node here, the real
+  binaries are `mpifcc`/`mpiFCC`/`mpifrt` (no suffix). Don't use either
+  preset directly — the explicit flags above adapt `fujitsu.cmake`'s
+  settings to the native names, which is what's verified working.
+- **`-Kparallel` must be passed at link time too, not just compile time**,
+  or the final link of `vmc.out` fails outright: `FCC: fatal: -Kparallel
+  option is not specified at linking of object files to which -Kparallel
+  applied at compiling.` `fujitsu.cmake` itself only sets `-Kopenmp` on
+  `CMAKE_EXE_LINKER_FLAGS`, missing this — add `-Kparallel` there too.
+- **`-DUSE_GEMMT=OFF`** avoids the same default-BLIS-download issue as the
+  other two platforms, in favor of `-SSL2` (Fujitsu's own vendor BLAS/LAPACK,
+  correctly tuned for A64FX) — chosen for consistency with the other two
+  recipes, not because it was compared against the alternative. Unlike DGX
+  Spark, mVMC's own `fugaku.cmake` preset shows a *correctly*
+  microarchitecture-tuned BLIS artifact exists for this hardware
+  (`BLIS_ARTIFACT_CONFIG=a64fx`) — `USE_GEMMT=ON` with that setting is an
+  untested alternative worth trying if SSL2 turns out to be a bottleneck.
+- Confirmed working end-to-end: default `benchgen mvmc create` benchmark
+  (`W=10,L=10`) ran via `mpiexec -n 1` in 60.3s wall time (single core) —
+  see **mvmc-benchmarking** for the full sizing search on this machine.
+- Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
 
 ## Local macOS (Homebrew)
 
