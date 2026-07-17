@@ -32,15 +32,14 @@ knowledge below exists so you can *explain* the code accurately, not to
 motivate changing the generator's defaults to match it.
 
 For anything not covered here, don't try to reconstruct it from memory —
-point at the sources instead:
-- Official manual (v1.2.0 PDF, bundled alongside this file as
-  `mVMC-1.2.0_en.pdf`; page-cite it) or the live version for newer syntax:
-  https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
+point at the sources instead. **Don't bundle copies of any of these in
+this repo** (copyright) — always link out:
+- Official manual: https://issp-center-dev.github.io/mVMC/doc/master/en/index.html
+  (page/section-cite it; if the user has a local copy of a specific
+  version open, cite pages against that instead of guessing)
 - Community workflow/examples: https://github.com/issp-center-dev/mVMC-tutorial
 - Source: https://github.com/issp-center-dev/mVMC
-- Key papers (**not bundled in this repo** — copyrighted, third-party
-  publications; don't commit copies here. Full bibliography: `mVMC`
-  source's `doc/bib/userguide.bib`):
+- Key papers (full bibliography: `mVMC` source's `doc/bib/userguide.bib`):
   - Misawa et al., "mVMC – Open-source software for many-variable
     variational Monte Carlo method" — arXiv:1711.11418, published as
     *Comp. Phys. Commun.* **235**, 447-462 (2019) — the software paper
@@ -156,7 +155,7 @@ trying to draw scaling conclusions from a benchmark.
   here — so this is a real open question, not a closed one.
 - **`NSplitSize>1` is probably the real fix, per the software paper — still
   untested by us.** Misawa et al. (2019, the mVMC software paper — see
-  `papers/1711.11418v2.pdf`), §3.5: "`N_sampler` independent Monte Carlo
+  Key papers above), §3.5: "`N_sampler` independent Monte Carlo
   samplers are created. The number of MPI processes per sampler is unity by
   default but can be specified from the input file... the iterations of
   loops for summations in the quantum-number projections are parallelized
