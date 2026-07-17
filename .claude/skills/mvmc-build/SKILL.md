@@ -1,6 +1,6 @@
 ---
 name: mvmc-build
-description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, the R-CCS Cloud qc-gh200 (NVIDIA Grace Hopper) partition, or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
+description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, the R-CCS Cloud qc-gh200 (NVIDIA Grace Hopper) partition, the R-CCS Cloud genoa (AMD EPYC) partition, or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
 ---
 
 # Building mVMC
@@ -233,6 +233,46 @@ correctly. Build was fast (~21s wall with `make -j72`).
   DGX Spark, you're not restricted to `mpirun` here. Which launcher is
   actually faster for a given run is a runtime/methodology question, not
   a build one — see **mvmc-benchmarking**.
+- Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
+
+## R-CCS Cloud, genoa (AMD EPYC)
+
+AMD EPYC 9684X, x86_64, Rocky Linux, 96 physical cores (SMT on, 192
+logical — use 96 for "one rank per core", not 192) / 768GB, single NUMA
+node, Ethernet only. The general-purpose default partition — no GPU, no
+vendor SDK module, plain distro toolchain.
+
+```sh
+module load system/genoa mpi/openmpi-x86_64
+cd mVMC && mkdir build && cd build
+cmake -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_Fortran_COMPILER=gfortran \
+      -DUSE_GEMMT=OFF -DCMAKE_BUILD_TYPE=Release \
+      -DBLAS_LIBRARIES=/lib64/libflexiblas.so.3 -DLAPACK_LIBRARIES=/lib64/libflexiblas.so.3 ..
+make -j$(nproc)
+```
+
+- **`find_package(BLAS)` finds nothing here without help** — unlike Rikyu
+  (where a system `libblas.so` alternative pointed at OpenBLAS) or DGX
+  Spark/qc-gh200 (where the `nvhpc` module's NVPL libraries auto-resolve),
+  this Rocky Linux image has no generic `libblas.so`/`liblapack.so`
+  symlink at all, only FlexiBLAS (`libflexiblas.so.3`) and a raw
+  `libopenblaso.so.0`. Point CMake at `libflexiblas.so.3` explicitly for
+  *both* `-DBLAS_LIBRARIES` and `-DLAPACK_LIBRARIES` (it provides both
+  symbol sets in one library) — passing it to only one variable leaves
+  some targets (`UHF`, `greenr2k`) with unresolved symbols at link time,
+  the same "DSO missing from command line" failure mode seen when
+  under-specifying NVPL on Rikyu.
+- No AMD AOCL is installed on this image — FlexiBLAS's default backend is
+  OpenBLAS's **OpenMP**-threaded build (`OPENBLAS-OPENMP`, confirmed via
+  `flexiblas list`), not the pthread-threaded variant that caused a real
+  problem on Rikyu (see mvmc-benchmarking) — this repo's standard
+  `OMP_NUM_THREADS=1` correctly throttles it, no extra env var needed.
+- No dual-runtime risk here at all — there's no vendor compiler in the
+  mix (plain `gcc`/`g++`/`gfortran` throughout), so unlike DGX Spark/qc-gh200
+  there's nothing to avoid; `ldd` shows a single `libgomp.so.1`.
+- `mpirun` confirmed working (bundled Open MPI 3.1 under
+  `mpi/openmpi-x86_64`); `srun` not tested here — check both per
+  mvmc-benchmarking's methodology before assuming either works.
 - Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
 
 ## Local macOS (Homebrew)

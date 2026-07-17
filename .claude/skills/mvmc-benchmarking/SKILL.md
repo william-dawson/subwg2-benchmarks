@@ -117,8 +117,9 @@ all along.
 | Local Mac (Apple M4) | 10 (4P + 6E) | GCC-16 + Accelerate (mvmc-build recipe) | `W=12, L=12` (144 sites) | 73.3s | `mpirun` (only launcher available); `W=13` measured at ~150s, over cap |
 | R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | `mpirun` (`srun` unsupported); requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11`; walker-check re-verified at 155.1s, `IndependentWalkers=48` as expected |
 | R-CCS Cloud `qc-gh200` (NVIDIA Grace Hopper) | 72 (Neoverse-V2) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 108.2s | `mpirun` (bare `srun` is broken here — see methodology point 7; `srun --mpi=pmix_v3` also works and gives the same ~equivalent numbers, but `mpirun` needs no extra flag); walker-check confirmed `IndependentWalkers=72`; `W=14` re-measured at 269s — over 2x the cap, a much steeper jump than the other machines saw between adjacent sizes, plausibly memory-bandwidth contention across 72 ranks on one socket; `W=10` baseline (100 sites) measured at 22.2s for scale |
+| R-CCS Cloud `genoa` (AMD EPYC 9684X) | 96 (SMT on, 192 logical — used 96 physical) | GCC + FlexiBLAS/OpenBLAS-OpenMP (mvmc-build recipe) | `W=13, L=13` (169 sites) | 102.2s | `mpirun --bind-to core --map-by core`; walker-check confirmed `IndependentWalkers=96`; `W=14` measured at 157.1s, over cap; `W=10` baseline (100 sites) measured at 27.7s for scale — single NUMA node, no cross-socket effects to check (unlike Rikyu's dual-socket Grace) |
 
-Peak per-rank memory on all four machines stayed in the ~100-200MB range
+Peak per-rank memory on all five machines stayed in the ~100-200MB range
 at these sizes — nowhere near any machine's actual memory budget per
 core. Confirms time, not memory, is the binding constraint at sizes
 practical to benchmark quickly.
