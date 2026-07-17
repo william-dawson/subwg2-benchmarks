@@ -1,6 +1,12 @@
-This repo generates benchmark inputs (and job scripts) for mVMC and SALMON.
+# SubWG2 Benchmarking Agent
 
-Clone it, fire up Claude Code, and ask for what you need. The skill in
+This repo encodes knowhow about benchmarking the codes (mVMC and SALMON)
+in SubWG2.
+
+## Usage
+
+Clone the repository, start Claude Code in the directory, and ask 
+the agent for what you need. The skill in
 .claude/skills/benchmark-generator handles the rest via uv.
 
 ## Prerequisites
