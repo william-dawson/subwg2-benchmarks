@@ -1,6 +1,6 @@
 ---
 name: mvmc-build
-description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
+description: Build mVMC (https://github.com/issp-center-dev/mVMC) from source, on the R-CCS Cloud DGX Spark partition (ng-dgx-m[0-3]), the R-CCS Cloud fx700 (Fujitsu A64FX) partition, the R-CCS Cloud qc-gh200 (NVIDIA Grace Hopper) partition, or locally on macOS via Homebrew. Use whenever the user asks to build, compile, or install mVMC on any of these targets.
 ---
 
 # Building mVMC
@@ -125,28 +125,44 @@ make -j$(nproc)
   (`W=10,L=10`) ran via `mpiexec -n 1` in 60.3s wall time (single core) —
   see **mvmc-benchmarking** for the full sizing search on this machine.
 - Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
-- **Running with more than a handful of ranks: always pass `--bind-to core
-  --map-by core` to `mpiexec`.** Without it, this node's Open MPI (see
-  below) does not bind processes to cores, and wall time degrades
-  *linearly* with rank count — measured at ~3.9s of pure overhead added
-  per additional rank, reaching **184s of overhead alone at 48 ranks**
-  for a problem that should take ~15s. Adding the binding flags dropped
-  that same 48-rank run from 184s to 15.2s — a ~12x fix, and it now
-  matches per-rank compute time with essentially zero overhead. This
-  looked exactly like a fundamental hardware/interconnect limitation
-  before the flag was found — it wasn't; always check binding before
-  concluding a multi-rank slowdown is a hardware ceiling.
 - **This partition's `FJSVstclanga` module bundles Open MPI** (compiled
   with the Fujitsu compiler) — confirmed via `ompi_info`/`orted`/`orterun`
   present in its `bin/`. Real production Fugaku uses Fujitsu's own
   proprietary MPI instead, tuned for its Tofu interconnect and A64FX's
-  4-NUMA-node (4 CMG) topology; that MPI handles process placement
-  correctly without needing explicit binding flags (per a real Fugaku
-  `W=10` run reported at 67.76s/48 ranks/1 node, no special flags,
-  matching what this testbed gets once bound correctly — see
-  **mvmc-benchmarking**). Don't assume this testbed's MPI behavior
-  (including this binding requirement) carries over to real Fugaku
-  unverified.
+  4-NUMA-node (4 CMG) topology. This is a build-environment fact with a
+  real runtime consequence — see **mvmc-benchmarking**'s methodology
+  section for the process-binding requirement it creates and the numbers
+  behind it; don't assume this testbed's MPI behavior carries over to
+  real Fugaku unverified.
+
+## R-CCS Cloud, qc-gh200 (NVIDIA Grace Hopper)
+
+NVIDIA Grace CPU (Neoverse-V2 cores, not DGX Spark's Cortex-X925/A725),
+aarch64, Rocky Linux, 72 cores, 572GB/node. Unified CPU+GPU superchip like
+`ng-dgx` — no `--gpus` flag needed even though unused here (pure CPU
+code).
+
+```sh
+module load system/qc-gh200 nvhpc
+cd mVMC && mkdir build && cd build
+cmake -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_Fortran_COMPILER=gfortran \
+      -DUSE_GEMMT=OFF -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+```
+
+Same recipe and same reasoning as DGX Spark (plain GCC under the `nvhpc`
+module for MPI/NVPL discovery, `-DUSE_GEMMT=OFF` to avoid the
+wrong-microarchitecture BLIS download) — confirmed working the same way
+here: `ldd` shows a single `libgomp.so.1`, NVPL BLAS/LAPACK linked
+correctly. Build was fast (~21s wall with `make -j72`).
+
+- **This partition's bundled MPI (HPC-X 2.50 / Open MPI 5.x, newer than
+  DGX Spark's) supports `srun` directly** — confirmed via `libpmix.so.2`
+  linked into `vmc.out`, and a real successful `srun -n 1 ...` run. Unlike
+  DGX Spark, you're not restricted to `mpirun` here. Which launcher is
+  actually faster for a given run is a runtime/methodology question, not
+  a build one — see **mvmc-benchmarking**.
+- Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
 
 ## Local macOS (Homebrew)
 

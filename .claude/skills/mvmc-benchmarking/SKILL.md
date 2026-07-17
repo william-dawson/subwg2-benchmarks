@@ -59,22 +59,38 @@ Deployment is fixed first, size is searched second — don't invert this:
    partition's Open MPI wasn't binding processes to cores by default.
    Adding `--bind-to core --map-by core` to `mpiexec` dropped the same
    48-rank/`W=7` run from 183.8s to 15.2s — over 12x — matching pure
-   compute with no overhead at all. Always test this before spending
-   more time narrowing `W` on a new machine; see **mvmc-build** for the
-   flag and more detail on why it's needed there specifically.
+   compute with no overhead at all.
+
+   This is not universal, though — don't apply it reflexively. Retesting
+   the *already-recorded* DGX Spark result with the same flags changed
+   nothing (127.7s unbound vs. 126.3s bound, within noise): that
+   partition's default placement was already fine. Check binding on each
+   new machine; don't assume either outcome.
+7. **Check both `srun` and `mpirun`, on each new machine — don't assume
+   `mpirun` is universal.** DGX Spark and `fx700`'s bundled Open MPI lack
+   Slurm PMI support, so `srun` fails outright there and `mpirun` is the
+   only option (see mvmc-build). `qc-gh200`'s newer bundled MPI (HPC-X
+   2.50) supports both — and there, `srun` was consistently ~25% faster
+   than `mpirun` (19.3s vs. 25.8s on a `W=10`/72-rank run), with neither
+   `--bind-to core --map-by core` nor `--mca plm slurm` closing the gap
+   (both left `mpirun` at ~26s). Where `srun` works, prefer it as the
+   default and only fall back to `mpirun` where `srun` is confirmed
+   broken — don't default to `mpirun` everywhere just because that's what
+   two of three machines so far have required.
 
 ## Recorded results
 
 All results use `benchgen mvmc create --w N --l N` (defaults otherwise:
 half filling, `NVMCSample=4000`, `NSROptItrStep=1`), `OMP_NUM_THREADS=1`,
-one MPI rank per core, via `mpirun` (see mvmc-build for why not `srun` on
-R-CCS Cloud).
+one MPI rank per core. Launcher varies by machine — see methodology point
+7 and each machine's row below; check mvmc-build for what a given
+machine's bundled MPI actually supports.
 
 | Machine | Cores | Build | Size | Wall time | Notes |
 |---|---|---|---|---|---|
-| R-CCS Cloud DGX Spark (`ng-dgx-m2`) | 20 (10 Cortex-X925 + 10 Cortex-A725) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 125.3s | `W=14` measured at 152s, over cap |
-| Local Mac (Apple M4) | 10 (4P + 6E) | GCC-16 + Accelerate (mvmc-build recipe) | `W=12, L=12` (144 sites) | 73.3s | `W=13` measured at ~150s, over cap |
-| R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | Requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11` |
+| R-CCS Cloud DGX Spark (`ng-dgx-m2`) | 20 (10 Cortex-X925 + 10 Cortex-A725) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 125.3s | `mpirun` (`srun` unsupported); `W=14` measured at 152s, over cap; binding flags retested and confirmed no-op (127.7s vs. 126.3s) |
+| Local Mac (Apple M4) | 10 (4P + 6E) | GCC-16 + Accelerate (mvmc-build recipe) | `W=12, L=12` (144 sites) | 73.3s | `mpirun` (only launcher available); `W=13` measured at ~150s, over cap |
+| R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | `mpirun` (`srun` unsupported); requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11` |
 
 Peak per-rank memory on all three machines stayed in the ~100-200MB range
 at these sizes — nowhere near any machine's actual memory budget per
