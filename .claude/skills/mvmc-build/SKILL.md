@@ -125,6 +125,28 @@ make -j$(nproc)
   (`W=10,L=10`) ran via `mpiexec -n 1` in 60.3s wall time (single core) —
   see **mvmc-benchmarking** for the full sizing search on this machine.
 - Binaries land at `build/src/mVMC/vmc.out`, `build/src/mVMC/vmcdry.out`.
+- **Running with more than a handful of ranks: always pass `--bind-to core
+  --map-by core` to `mpiexec`.** Without it, this node's Open MPI (see
+  below) does not bind processes to cores, and wall time degrades
+  *linearly* with rank count — measured at ~3.9s of pure overhead added
+  per additional rank, reaching **184s of overhead alone at 48 ranks**
+  for a problem that should take ~15s. Adding the binding flags dropped
+  that same 48-rank run from 184s to 15.2s — a ~12x fix, and it now
+  matches per-rank compute time with essentially zero overhead. This
+  looked exactly like a fundamental hardware/interconnect limitation
+  before the flag was found — it wasn't; always check binding before
+  concluding a multi-rank slowdown is a hardware ceiling.
+- **This partition's `FJSVstclanga` module bundles Open MPI** (compiled
+  with the Fujitsu compiler) — confirmed via `ompi_info`/`orted`/`orterun`
+  present in its `bin/`. Real production Fugaku uses Fujitsu's own
+  proprietary MPI instead, tuned for its Tofu interconnect and A64FX's
+  4-NUMA-node (4 CMG) topology; that MPI handles process placement
+  correctly without needing explicit binding flags (per a real Fugaku
+  `W=10` run reported at 67.76s/48 ranks/1 node, no special flags,
+  matching what this testbed gets once bound correctly — see
+  **mvmc-benchmarking**). Don't assume this testbed's MPI behavior
+  (including this binding requirement) carries over to real Fugaku
+  unverified.
 
 ## Local macOS (Homebrew)
 

@@ -142,6 +142,22 @@ trying to draw scaling conclusions from a benchmark.
   functions are invoked far more often than the third and their overhead
   dominates. This is not "mVMC doesn't use OpenMP well" — one of the three
   call sites is doing exactly the right thing; it's just outweighed.
+- **Correction from a real detailed timer breakdown** (user-reported,
+  actual production Fugaku run, `W=10` — see `mvmc-benchmarking`'s
+  "Reference point" section): the table above, built from inspecting
+  `vmcmain.c`/`vmcmake.c`/`pfupdate.c`, doesn't cover every `CalculateMAll`
+  call site. `VMCMainCal`'s *own* `CalculateMAll` call (computing local
+  energies per retained sample for the SR gradient) was actually the
+  single largest sub-component in that run — 27.34s of 67.76s total,
+  bigger than `VMCMakeSample`'s `UpdateMAll` (12.19s) or its periodic
+  `recal PfM and InvM` recompute (9.87s, the `if(nAccept>Nsite)` call this
+  skill already documents). `StochasticOpt` (the actual SR solve,
+  confirmed using ScaLAPACK's `DPOSV` in that run) was only 0.57s — two
+  orders of magnitude smaller than sampling/local-energy cost. Net: the
+  dominant costs are spread across at least two separate `CalculateMAll`
+  call sites (one inside the sampling loop, one inside the post-sampling
+  local-energy evaluation), not concentrated in the single call this
+  skill had focused on from source inspection alone.
 - **Practical guidance for this project so far**: use MPI ranks for more
   statistics per wall-clock second, not for speed (see above — ranks don't
   reduce wall time by default either). Default to `OMP_NUM_THREADS=1`

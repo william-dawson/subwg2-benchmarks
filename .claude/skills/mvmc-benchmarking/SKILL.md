@@ -49,6 +49,19 @@ Deployment is fixed first, size is searched second — don't invert this:
    peak memory is set once during the initial `SetMemory()` allocation
    near the start of the run, so you don't need the run to complete to
    have learned what you needed from a doomed candidate.
+6. **Before concluding a multi-rank slowdown is a hardware/interconnect
+   limit, check MPI process binding.** On R-CCS Cloud's `fx700` partition,
+   decrementing `W` repeatedly failed to bring a 48-rank run under the
+   time budget — per-rank compute time stayed flat (~15s) while wall time
+   grew *linearly* with rank count (1 rank: 13.7s, 12: 45.8s, 24: 91.9s,
+   48: 183.8s — ~3.9s of pure overhead added per rank, every time), which
+   looked exactly like a fundamental scaling ceiling. It wasn't: that
+   partition's Open MPI wasn't binding processes to cores by default.
+   Adding `--bind-to core --map-by core` to `mpiexec` dropped the same
+   48-rank/`W=7` run from 183.8s to 15.2s — over 12x — matching pure
+   compute with no overhead at all. Always test this before spending
+   more time narrowing `W` on a new machine; see **mvmc-build** for the
+   flag and more detail on why it's needed there specifically.
 
 ## Recorded results
 
@@ -61,11 +74,40 @@ R-CCS Cloud).
 |---|---|---|---|---|---|
 | R-CCS Cloud DGX Spark (`ng-dgx-m2`) | 20 (10 Cortex-X925 + 10 Cortex-A725) | GCC + NVPL `_gomp` (mvmc-build recipe) | `W=13, L=13` (169 sites) | 125.3s | `W=14` measured at 152s, over cap |
 | Local Mac (Apple M4) | 10 (4P + 6E) | GCC-16 + Accelerate (mvmc-build recipe) | `W=12, L=12` (144 sites) | 73.3s | `W=13` measured at ~150s, over cap |
+| R-CCS Cloud `fx700` testbed (Fujitsu A64FX) | 48 (4 NUMA/CMG × 12) | Fujitsu compiler + SSL2 (mvmc-build recipe) | `W=12, L=12` (144 sites) | 158.0s | Requires `--bind-to core --map-by core` (see methodology point 6) — accepted as "close enough" over the ~120s target rather than narrowing further to `W=11` |
 
-Peak per-rank memory on both machines stayed in the ~100-200MB range at
-these sizes — nowhere near either machine's actual memory budget per
+Peak per-rank memory on all three machines stayed in the ~100-200MB range
+at these sizes — nowhere near any machine's actual memory budget per
 core. Confirms time, not memory, is the binding constraint at sizes
 practical to benchmark quickly.
+
+## Reference point: real Fugaku (not from this pipeline)
+
+User-reported, run directly on production Fugaku (not built/run via this
+repo's tooling — recorded here as an external calibration point, not a
+result to treat the same as the table above):
+
+- `W=10, L=10` (100 sites), 48 MPI ranks, 1 node, same input `benchgen
+  mvmc create --w 10 --l 10` would generate (`ncond=100`,
+  `NVMCSample=4000`, `NSROptItrStep=1`) — **67.76s total**, no special
+  binding flags needed (Fugaku's own MPI, not the `fx700` testbed's Open
+  MPI, handles placement correctly by default).
+- This is the number that caught the `fx700` testbed's binding bug: its
+  unbound 48-rank runs were wildly slower than this for comparable sizes,
+  which is what prompted checking process binding in the first place
+  (methodology point 6). Once bound correctly, the testbed's `W=7` result
+  (15.2s) scales cubically to a `W=10` prediction of ~62s — close to this
+  real 67.76s, confirming the testbed is now a reasonable proxy for real
+  Fugaku once binding is fixed.
+- The detailed per-phase timer breakdown from this run also corrected an
+  assumption in `mvmc-reference`'s parallelization notes: `VMCMainCal`'s
+  own `CalculateMAll` call (27.34s of the 67.76s total) is actually the
+  single largest sub-component, not `VMCMakeSample`'s `UpdateMAll`
+  (12.19s) as the DGX Spark/Mac profiling alone had suggested. `StochasticOpt`
+  (the actual SR matrix solve, using ScaLAPACK's `DPOSV` — confirmed
+  active via `initBLACS`/`DPOSV` sub-timers) was only 0.57s — sampling
+  and local-energy evaluation dominate total cost by roughly two orders
+  of magnitude over the SR solve itself, in practice.
 
 ## Adding a new machine
 
