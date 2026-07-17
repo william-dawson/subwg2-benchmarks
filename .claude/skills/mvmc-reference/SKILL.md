@@ -11,15 +11,17 @@ lattice, or Heisenberg spin) via the Stochastic Reconfiguration (SR)
 method, using Markov-chain Monte Carlo sampling for expectation values.
 Source: https://github.com/issp-center-dev/mVMC.
 
-This repo keeps three kinds of mVMC knowledge deliberately separate —
+This repo keeps four kinds of mVMC knowledge deliberately separate —
 don't blend them:
 
 - **This skill (mvmc-reference)**: what the code *is* and how it behaves —
   physics, input keywords, parallelization semantics, output formats.
 - **benchmark-generator skill**: the CLI in this repo for generating
   `.inp`/job-script files.
-- **mvmc-build skill** (and any future run/monitor tooling): building and
-  executing the binary on a cluster.
+- **mvmc-build skill**: building the binary on a given machine.
+- **mvmc-benchmarking skill**: the empirical methodology for picking a
+  problem size per machine (e.g. largest lattice that fits in per-rank
+  memory at one-MPI-rank-per-core), plus recorded results per machine.
 
 **Important framing**: this repo's benchmark generator measures raw code
 *throughput*, not physics. Real research runs use very different settings
