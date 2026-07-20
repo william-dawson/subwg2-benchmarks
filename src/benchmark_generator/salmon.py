@@ -22,7 +22,7 @@ cp "output.$PJM_JOBID"/0/2/stdout.2.0 {sys_name}.td.out
 """
 
 
-def create_input(atoms, base, size, tddft=False, spacing=0.33 / 1.88973):
+def create_input(atoms, base, size, tddft=False, spacing=0.33 / 1.88973, nt=None):
     """
     Create an input file for Salmon based on an ASE Atoms structure and a
     base input template.
@@ -33,6 +33,12 @@ def create_input(atoms, base, size, tddft=False, spacing=0.33 / 1.88973):
     size (list): Size of the supercell in the form [nx, ny, nz].
     tddft (bool): Whether to use TDDFT settings in the input.
     spacing (float): Grid spacing for the rgrid.
+    nt (int | None): Override for &tgrid/nt (TDDFT propagation step count).
+        Only applies when tddft=True; the base template's value (and dt)
+        is used for the ground-state run and whenever nt is None. A short
+        nt (e.g. a few hundred steps) gives a fast, representative
+        per-step timing without waiting out the full production-length
+        propagation the base template's nt=6000 implies.
 
     Returns:
     str: The generated input file content in NML format.
@@ -88,6 +94,8 @@ def create_input(atoms, base, size, tddft=False, spacing=0.33 / 1.88973):
     if tddft:
         inp["calculation"]["theory"] = "tddft_response"
         inp["emfield"] = {"ae_shape1": "impulse"}
+        if nt is not None:
+            inp["tgrid"]["nt"] = nt
 
     # Prepare the NML string
     from io import StringIO

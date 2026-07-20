@@ -85,6 +85,11 @@ def salmon_create(
     ny: int = typer.Option(1, help="Supercell repeats along y."),
     nz: int = typer.Option(1, help="Supercell repeats along z."),
     spacing: float = typer.Option(0.33 / 1.88973, help="Grid spacing (bohr)."),
+    nt: int = typer.Option(
+        6000,
+        help="TDDFT propagation steps (&tgrid/nt). Lower for a quick "
+        "benchmark timing instead of a full production-length run.",
+    ),
     base: Path = typer.Option(
         DEFAULT_DATA_DIR / "base.nml", help="Base SALMON &namelist template."
     ),
@@ -109,7 +114,9 @@ def salmon_create(
     base_inp = read(base)
 
     dft = salmon_lib.create_input(atoms, base_inp, size, tddft=False, spacing=spacing)
-    tddft = salmon_lib.create_input(atoms, base_inp, size, tddft=True, spacing=spacing)
+    tddft = salmon_lib.create_input(
+        atoms, base_inp, size, tddft=True, spacing=spacing, nt=nt
+    )
 
     sys_name = f"Si-{nx}-{ny}-{nz}"
     dft_path = output_dir / f"{sys_name}.nml"

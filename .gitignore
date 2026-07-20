@@ -12,3 +12,7 @@ wheels/
 # Generated benchmark inputs
 output/*
 !output/.gitkeep
+
+# Copyrighted third-party docs (papers, manuals) -- never commit these,
+# always cite/link to the official source instead
+*.pdf
