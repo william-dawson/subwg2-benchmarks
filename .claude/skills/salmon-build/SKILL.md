@@ -701,7 +701,57 @@ make -j$(nproc)
 - Not yet done: rebuilding `qc-gh200` itself with `nvhpc/26.3` to confirm
   the same fix applies there (same module family, `26.3` is available
   there too) — the natural next step to close this out completely.
-- Multi-rank (4 GPUs/node, per the "1 MPI rank = 1 GPU" convention) not
-  yet tested — this session's GPU work stopped at the 1-rank
-  root-causing step; scaling to 4 ranks/4 GPUs on `nvhpc/26.3` is the
-  next thing to try.
+
+#### Multi-GPU (4 ranks/4 GPUs), 1 node — binding fixed, but a new post-SCF hang appeared
+
+- **Bare `mpirun -n 4 salmon < input` puts every rank on GPU 0.** SALMON has
+  no internal GPU-device-assignment logic anywhere in `src/` (confirmed by
+  grepping for `acc_set_device_num`, `cudaSetDevice`, `CUDA_VISIBLE_DEVICES`,
+  `acc_init` — zero matches). Symptom: `srun --overlap --jobid <id>
+  nvidia-smi` showed GPU 0 with several GB allocated and GPUs 1-3 at 0
+  MiB/0% the entire run; the 4-rank job ran far slower than the 1-rank job
+  and eventually hit the job's time limit.
+- **The manual documents the fix**: SALMON doc v2.2.2 §2.6.5 "GPU
+  acceleration" → "Multi-GPU run" (p.15) gives a `wrapper.sh` that every
+  rank execs through, setting
+  `CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_LOCAL_RANK % NCUDA_GPUS))`
+  before `exec`'ing the real binary:
+
+  ```sh
+  #!/bin/bash
+  ### wrapper.sh
+  NCUDA_GPUS=${NCUDA_GPUS:-`nvidia-smi -L | wc -l`}
+  if [ "$OMPI_COMM_WORLD_LOCAL_SIZE" -gt "$NCUDA_GPUS" ]; then
+    if [ "$OMPI_COMM_WORLD_LOCAL_RANK" -eq 0 ]; then
+      nvidia-cuda-mps-control -d
+    fi
+    sleep 10
+  fi
+  export CUDA_VISIBLE_DEVICES=$((${OMPI_COMM_WORLD_LOCAL_RANK} % ${NCUDA_GPUS}))
+  exec "$@"
+  ```
+
+  Launched as `mpirun -n 4 ./wrapper.sh "$BIN" < input.nml`. This requires
+  an OpenMPI-flavored `mpirun` (Rikyu's `nvhpc` module bundles one, so
+  `$OMPI_COMM_WORLD_LOCAL_RANK`/`$OMPI_COMM_WORLD_LOCAL_SIZE` are set).
+- **Confirmed the wrapper fixes the binding itself**: with it in place,
+  `nvidia-smi --query-gpu=index,memory.used,utilization.gpu` showed all 4
+  GPUs with ~1.7 GB allocated (vs. only GPU 0 before), and the GS SCF loop
+  reached `iter=100` with the *correct* energy
+  (`Total Energy -6099.94333354 eV`, matching the 1-GPU/1-rank result) —
+  so the physics and the per-rank device assignment are both right.
+- **But the job still hung and hit the time limit** — even with correct
+  binding. The log stops dead right after the `iter=100` report; nothing
+  (checkpoint/restart write, force calc, the closing timing table that the
+  1-GPU run always prints, `end SALMON`) is ever written in the remaining
+  ~9 minutes before Slurm kills it on `TIMEOUT`. No error/abort message
+  appears anywhere (log or `slurm-*.out`) — it just stops advancing.
+  **This is a distinct bug from the GPU-binding issue**: binding is now
+  provably correct (memory spread across all 4 GPUs, right energy), yet
+  the 4-rank job still deadlocks somewhere in post-SCF finalization
+  (most likely a collective op — `force calc`/`checkpoint-restart` in the
+  1-GPU timing table are the next places to look) that never triggers at
+  1 rank. **Not yet root-caused** — this is the next thing to dig into,
+  and per the user's explicit preference, without resorting to manually
+  tweaking the parallel region until other avenues (env vars, launcher
+  flags, MPS) are exhausted.
