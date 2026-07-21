@@ -11,27 +11,28 @@ files work, see the **salmon-reference** skill. For generating benchmark
 problem-size-per-machine methodology and recorded results, see
 **salmon-benchmarking**.
 
-**Status**: local macOS and `genoa` are fully verified (built, ran a full
-GS+TDDFT SiO2 calculation end-to-end, correct physics/output — see
-`salmon-benchmarking`'s Recorded results). `fx700` also works, but **only
-with a GCC+MPICH toolchain, not the Fujitsu-compiler build** — the
-Fujitsu-compiler+Open-MPI build compiles fine but reliably crashes on
-multi-rank execution; see that section below for the full diagnostic
-trail (root-caused to Fujitsu's own stack, not SALMON) and use the
-GCC+MPICH recipe for any real `fx700` benchmarking. `qc-gh200`'s CPU-only
-build (`nvhpc-openmp`) works correctly, but its **GPU build
-(`nvhpc-openacc`) has a real, unresolved silent correctness bug** — wrong
-Total Energy, reproduces even at 1 rank/1 GPU (so it's not an MPI/UCX
-issue despite early appearances — see that section for the full,
-corrected diagnostic trail). **DGX Spark's GPU build (same
-`nvhpc-openacc` preset, different GPU generation — GB10/Blackwell vs.
-GH200/Hopper) gives the *correct* answer** — it's the machine to use for
-actual GPU-accelerated SALMON work right now. **Rikyu's CPU-only build is
-fully verified**, including a working MPI+OpenMP hybrid recipe and clean
-2-node scaling (see that section for the InfiniBand/UAR caveat at full
-144-rank-per-node density) — Rikyu's GPU build not yet attempted. Add
-sections here as each one is actually built, following the
-same pattern.
+**Status**: local macOS, `genoa`, `fx700` (GCC+MPICH toolchain only — see
+that section for why the Fujitsu-compiler build reliably crashes on
+multi-rank execution, root-caused to Fujitsu's own stack, not SALMON),
+`qc-gh200` (CPU-only build), DGX Spark (GPU build), and Rikyu (both CPU
+and GPU builds) are all verified working end-to-end (GS+TDDFT, correct
+physics — see `salmon-benchmarking`'s Recorded results).
+
+**GPU builds (`nvhpc-openacc`) must use `nvhpc/26.3`, not `26.5`.**
+`nvhpc/26.5` has a confirmed, silent compiler bug — wrong `Total Energy`
+(a fixed `12.19 eV` offset in the Ewald ion-ion term), reproduces
+deterministically at 1 rank/1 GPU on both GH200/Hopper (`qc-gh200`) and
+GB200/Blackwell (Rikyu), confirmed to be NVIDIA's current latest
+release (not fixed by upgrading). See `qc-gh200`'s and Rikyu's GPU
+sections below for the diagnostic trail, and
+`salmon-nvhpc265-bug-report.md` at the repo root for a bug-report-ready
+writeup (not yet filed). `qc-gh200` itself hasn't been rebuilt with
+`26.3` yet — do that before using it for GPU work. DGX Spark's GPU
+build only ever had `26.3` available, so it was correct by default.
+
+**Rikyu's multi-GPU scaling (2+ GPUs/node) has an unresolved post-SCF
+hang** even with correct per-rank GPU binding — see Rikyu's GPU section
+below, actively being investigated.
 
 ```sh
 git clone https://github.com/SALMON-TDDFT/SALMON2.git
@@ -670,49 +671,39 @@ make -j$(nproc)
     sublinear as expected from communication overhead, but clean genuine
     scaling with no stability or correctness issues.
 
-### Rikyu GPU (GB200, Blackwell) — root-caused the qc-gh200 bug
+### Rikyu GPU (GB200, Blackwell) — MUST use `nvhpc/26.3`, not `26.5`
 
 Same `nvhpc-openacc` recipe as `qc-gh200`/DGX Spark:
 
 ```sh
-module load nvhpc/26.3   # NOT 26.5 -- see below
+module load nvhpc/26.3   # NOT 26.5 -- silently wrong energy, see below
 cd SALMON2 && mkdir build_gpu && cd build_gpu
 python3 ../configure.py --arch=nvhpc-openacc --prefix="$(pwd)/install" -r
 make -j$(nproc)
 ```
 
-- **First build used `nvhpc/26.5`** (matching Rikyu's CPU-build choice,
-  for consistency) — reproduced `qc-gh200`'s exact bug: a 1-rank/1-GPU
-  GS smoke test converged cleanly through 100 iterations to
-  `Total Energy -6112.12922835 eV` — **bit-for-bit identical** to
-  `qc-gh200`'s wrong value, on completely different GPU hardware
-  (GB200/Blackwell here vs. GH200/Hopper there). No MPI errors at all
-  (1 rank, no collectives) — confirms again this isn't an MPI/UCX issue.
-- **Rebuilt identically, only swapping `nvhpc/26.5` → `nvhpc/26.3`**
-  (same node, same physical GPU, same everything else) — **fixed it
-  completely**: `Total Energy -6099.94333354 eV`, correct.
-- **This is the root cause of the `qc-gh200` bug**: an `nvhpc/26.5`
-  OpenACC compiler regression, not a GPU-architecture-specific issue —
-  see `qc-gh200`'s section above for the full reasoning (why the bug's
-  deterministic, clean-converging character points at compiler codegen
-  rather than a runtime/memory-safety bug) and the corrected picture
-  (DGX Spark was only ever accidentally correct because 26.3 is its sole
-  available module version, not because Blackwell is immune).
-- Not yet done: rebuilding `qc-gh200` itself with `nvhpc/26.3` to confirm
-  the same fix applies there (same module family, `26.3` is available
-  there too) — the natural next step to close this out completely.
-- **Pinpointed to a single term**: the full Kohn-Sham eigenvalue
-  spectrum is bit-identical between correct and buggy builds (ruling out
-  the Hamiltonian/diagonalization GPU code), and uncommenting
-  `total_energy.f90`'s built-in energy-component debug print (needs
-  `use parallelization, only: nproc_id_global` added — not otherwise
-  imported in that subroutine) shows every term matches to `~1e-12`
-  Hartree except `E_ion_ion` (the Ewald ion-ion energy), which alone
-  accounts for the entire `-12.19 eV` error. Full breakdown and the
-  specific OpenACC block to look at (`calc_Total_Energy_periodic`'s
-  Ewald pair-sum, `total_energy.f90` ~lines 327-360, plus `init_ewald`'s
-  pair-list construction ~lines 840-940) are in
-  `nvhpc-26.5-openacc-bug-reproducer.md` at the repo root.
+**`nvhpc/26.5` has a confirmed compiler bug**: it silently produces a
+wrong (but plausible-looking, deterministic) ground-state total energy
+— `Total Energy -6112.12922835 eV` instead of the correct
+`-6099.94333354 eV`, a fixed `12.19 eV` offset, bit-for-bit identical
+on both GH200/Hopper (`qc-gh200`) and GB200/Blackwell (here). No crash,
+no warning, no MPI involvement (reproduces at 1 rank). Confirmed to
+`nvhpc/26.5` is NVIDIA's current latest release (as of 2026-07-21, no
+newer version exists) — this isn't a "just upgrade" problem.
+
+We dug deep enough to isolate the wrong term (`E_ion_ion`, the Ewald
+ion-ion energy — every other total-energy component matches to
+floating-point noise) and to disprove several would-be explanations
+(not an MPI/UCX issue, not a different-but-valid SCF local minimum —
+see below), but a real, minimal, SALMON-independent reproducer of the
+underlying compiler defect eluded us — small standalone Fortran+OpenACC
+programs mimicking the same loop/reduction shape compile and run
+*correctly* under `nvhpc/26.5`. **Practical conclusion: use `nvhpc/26.3`
+for all Rikyu/qc-gh200 GPU builds until NVIDIA fixes this** (a full bug
+report is drafted at `salmon-nvhpc265-bug-report.md` in the repo root,
+ready to open against SALMON/NVIDIA — not yet filed). Don't spend more
+time chasing a GPU-resident workaround for this; it isn't worth it
+relative to just pinning the compiler version.
 
 #### Multi-GPU (4 ranks/4 GPUs), 1 node — binding fixed, but a new post-SCF hang appeared
 
