@@ -30,9 +30,17 @@ writeup (not yet filed). `qc-gh200` itself hasn't been rebuilt with
 `26.3` yet — do that before using it for GPU work. DGX Spark's GPU
 build only ever had `26.3` available, so it was correct by default.
 
-**Rikyu's multi-GPU scaling (2+ GPUs/node) has an unresolved post-SCF
-hang** even with correct per-rank GPU binding — see Rikyu's GPU section
-below, actively being investigated.
+**Rikyu multi-GPU, single node (2 and 4 GPUs): fully fixed and
+verified**, both GS and TDDFT. Needed a `wrapper.sh` for per-rank GPU
+binding (documented in the manual), a CMake cache override
+(`-DFORTRAN_COMPILER_HAS_MPI_VERSION3=OFF`, working around a real
+SALMON/MPI bug — `calc_uVpsi_rdivided`'s per-atom `MPI_Iallreduce`
+hangs at `comm_wait_all` for >1 rank), and for TDDFT specifically an
+explicit `nproc_ob=N` in `&parallel` (works around a separate
+restart-density-redistribution bug when the default real-space-grid
+split is used). See Rikyu's GPU section below for the full trail.
+**Multi-node (8 GPUs = 2 nodes) hits a third, different, still-open
+hang** — not yet root-caused, see that same section.
 
 ```sh
 git clone https://github.com/SALMON-TDDFT/SALMON2.git
@@ -705,56 +713,126 @@ ready to open against SALMON/NVIDIA — not yet filed). Don't spend more
 time chasing a GPU-resident workaround for this; it isn't worth it
 relative to just pinning the compiler version.
 
-#### Multi-GPU (4 ranks/4 GPUs), 1 node — binding fixed, but a new post-SCF hang appeared
+#### Multi-GPU, single node (2 and 4 ranks/GPUs) — fully fixed, both GS and TDDFT
 
-- **Bare `mpirun -n 4 salmon < input` puts every rank on GPU 0.** SALMON has
-  no internal GPU-device-assignment logic anywhere in `src/` (confirmed by
-  grepping for `acc_set_device_num`, `cudaSetDevice`, `CUDA_VISIBLE_DEVICES`,
-  `acc_init` — zero matches). Symptom: `srun --overlap --jobid <id>
-  nvidia-smi` showed GPU 0 with several GB allocated and GPUs 1-3 at 0
-  MiB/0% the entire run; the 4-rank job ran far slower than the 1-rank job
-  and eventually hit the job's time limit.
-- **The manual documents the fix**: SALMON doc v2.2.2 §2.6.5 "GPU
-  acceleration" → "Multi-GPU run" (p.15) gives a `wrapper.sh` that every
-  rank execs through, setting
-  `CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_LOCAL_RANK % NCUDA_GPUS))`
-  before `exec`'ing the real binary:
+**Status: 1, 2, and 4 GPUs on a single Rikyu node are all fully verified
+correct** for both GS and TDDFT. Two separate, unrelated fixes were
+needed to get there — one for device binding, one for a real SALMON/MPI
+bug. Multi-*node* (8 GPUs = 2 nodes) hits a third, still-unresolved
+hang — see the subsection below.
 
-  ```sh
-  #!/bin/bash
-  ### wrapper.sh
-  NCUDA_GPUS=${NCUDA_GPUS:-`nvidia-smi -L | wc -l`}
-  if [ "$OMPI_COMM_WORLD_LOCAL_SIZE" -gt "$NCUDA_GPUS" ]; then
-    if [ "$OMPI_COMM_WORLD_LOCAL_RANK" -eq 0 ]; then
-      nvidia-cuda-mps-control -d
-    fi
-    sleep 10
+**Fix 1 — per-rank GPU binding.** Bare `mpirun -n N salmon < input`
+puts every rank on GPU 0. SALMON has no internal GPU-device-assignment
+logic anywhere in `src/` (confirmed by grepping for
+`acc_set_device_num`, `cudaSetDevice`, `CUDA_VISIBLE_DEVICES`,
+`acc_init` — zero matches). Symptom: `srun --overlap --jobid <id>
+nvidia-smi` showed GPU 0 with several GB allocated and the other GPUs
+at 0 MiB/0% the entire run. The manual (SALMON doc v2.2.2 §2.6.5 "GPU
+acceleration" → "Multi-GPU run", p.15) documents the fix: a `wrapper.sh`
+every rank execs through, setting
+`CUDA_VISIBLE_DEVICES=$((OMPI_COMM_WORLD_LOCAL_RANK % NCUDA_GPUS))`
+before `exec`'ing the real binary:
+
+```sh
+#!/bin/bash
+### wrapper.sh
+NCUDA_GPUS=${NCUDA_GPUS:-`nvidia-smi -L | wc -l`}
+if [ "$OMPI_COMM_WORLD_LOCAL_SIZE" -gt "$NCUDA_GPUS" ]; then
+  if [ "$OMPI_COMM_WORLD_LOCAL_RANK" -eq 0 ]; then
+    nvidia-cuda-mps-control -d
   fi
-  export CUDA_VISIBLE_DEVICES=$((${OMPI_COMM_WORLD_LOCAL_RANK} % ${NCUDA_GPUS}))
-  exec "$@"
-  ```
+  sleep 10
+fi
+export CUDA_VISIBLE_DEVICES=$((${OMPI_COMM_WORLD_LOCAL_RANK} % ${NCUDA_GPUS}))
+exec "$@"
+```
 
-  Launched as `mpirun -n 4 ./wrapper.sh "$BIN" < input.nml`. This requires
-  an OpenMPI-flavored `mpirun` (Rikyu's `nvhpc` module bundles one, so
-  `$OMPI_COMM_WORLD_LOCAL_RANK`/`$OMPI_COMM_WORLD_LOCAL_SIZE` are set).
-- **Confirmed the wrapper fixes the binding itself**: with it in place,
-  `nvidia-smi --query-gpu=index,memory.used,utilization.gpu` showed all 4
-  GPUs with ~1.7 GB allocated (vs. only GPU 0 before), and the GS SCF loop
-  reached `iter=100` with the *correct* energy
-  (`Total Energy -6099.94333354 eV`, matching the 1-GPU/1-rank result) —
-  so the physics and the per-rank device assignment are both right.
-- **But the job still hung and hit the time limit** — even with correct
-  binding. The log stops dead right after the `iter=100` report; nothing
-  (checkpoint/restart write, force calc, the closing timing table that the
-  1-GPU run always prints, `end SALMON`) is ever written in the remaining
-  ~9 minutes before Slurm kills it on `TIMEOUT`. No error/abort message
-  appears anywhere (log or `slurm-*.out`) — it just stops advancing.
-  **This is a distinct bug from the GPU-binding issue**: binding is now
-  provably correct (memory spread across all 4 GPUs, right energy), yet
-  the 4-rank job still deadlocks somewhere in post-SCF finalization
-  (most likely a collective op — `force calc`/`checkpoint-restart` in the
-  1-GPU timing table are the next places to look) that never triggers at
-  1 rank. **Not yet root-caused** — this is the next thing to dig into,
-  and per the user's explicit preference, without resorting to manually
-  tweaking the parallel region until other avenues (env vars, launcher
-  flags, MPS) are exhausted.
+Launched as `mpirun -n N ./wrapper.sh "$BIN" < input.nml` (requires an
+OpenMPI-flavored `mpirun`, which Rikyu's `nvhpc` module bundles).
+Confirmed via `nvidia-smi --query-gpu=index,memory.used,utilization.gpu`
+showing memory spread evenly across all N GPUs instead of only GPU 0.
+
+**Fix 2 — the real bug: `calc_uVpsi_rdivided`'s per-atom
+`MPI_Iallreduce` hangs at `comm_wait_all` whenever >1 rank/GPU is
+involved.** With binding fixed, GS still hung dead right after
+`iter=100` (no force calc, no checkpoint write, no `end SALMON`), and
+TDDFT hung even earlier (right after Ewald setup). Root-caused by
+adding checkpoint `write` statements throughout `calc_force` and
+`nonlocal_potential.f90`'s `calc_uVpsi_rdivided`: both ranks
+successfully **posted** all `MPI_Iallreduce` calls (one per atom, up to
+18 simultaneous non-blocking collectives, each on a distinct per-atom
+sub-communicator `ppg%icomm_atom(ia)`, operating on CUDA
+Fortran device-resident arrays `dev_uVpsibox`), but neither ever
+returned from the subsequent `comm_wait_all`. This code path only
+exists when CMake detects `FORTRAN_COMPILER_HAS_MPI_VERSION3` (an
+MPI-3 non-blocking-collective capability check) — when true, SALMON
+uses this exotic per-atom `Iallreduce` scheme instead of its simpler
+fallback (one blocking `comm_summation` over the whole array, on
+regular host-managed memory).
+
+**Fix**: override that CMake cache variable to force the simple
+fallback path — no source changes needed:
+
+```sh
+cd build_gpu
+cmake -DFORTRAN_COMPILER_HAS_MPI_VERSION3=OFF .
+make -j$(nproc)
+```
+
+(Confirm it actually took: `grep FORTRAN_COMPILER_HAS_MPI_VERSION3
+CMakeCache.txt` should read `OFF` — a plain `set(... CACHE ...)` in
+SALMON's CMake without `FORCE` does respect an existing cache value, so
+this works cleanly on top of an existing configured build directory,
+no fresh `configure.py` run required.)
+
+With both fixes applied, 2-rank and 4-rank single-node GS confirmed
+correct (`Total Energy -6099.94333354 eV`, matching 1-GPU) — see
+`salmon-benchmarking` for full timing.
+
+**TDDFT needs one more thing: explicit `nproc_ob=N`.** Even with both
+fixes above, 2-rank/2-GPU TDDFT (reusing GS restart data) still failed
+— not a hang this time, but a wrong electron count (`Ne=10783...`
+instead of `96`) triggering `ieee_invalid`/NaN and a clean `FORTRAN
+STOP`. This is a separate, TDDFT-restart-specific bug: SALMON's default
+auto-parallelization splits the real-space grid (`nproc_rgrid`) across
+ranks, and something in redistributing the restart density across that
+spatial split is wrong. Fix: bypass it entirely by explicitly setting
+orbital parallelization instead (no spatial split at all, so no
+restart-density redistribution to get wrong):
+
+```
+&parallel
+    nproc_k = 1
+    nproc_ob = N        ! N = number of GPUs/ranks
+    nproc_rgrid = 1,1,1
+/
+```
+
+With this, 2-rank and 4-rank single-node TDDFT are both confirmed
+correct (`_rt_energy.data` final energy `-6099.81098920 eV`, exact
+match to the 1-GPU result) — see `salmon-benchmarking` for timing
+(spoiler: at this 18-atom problem size, multi-GPU TDDFT is *slower*
+than 1 GPU — communication overhead dominates; see that skill for
+the numbers and when this might flip on a larger system).
+
+#### Multi-node (8 GPUs = 2 nodes) — unresolved, different hang
+
+**Not yet root-caused.** With both single-node fixes above still
+applied, an 8-rank job across 2 nodes (4 GPUs/node) hangs — but at a
+completely different point than either single-node bug: it never even
+prints `"  theory= ..."` (the very first line `main.f90` writes after
+`read_input` completes), i.e., it's stuck somewhere in
+`read_input`/`set_basic_flag`/`read_Hubbard_parameters`/
+`read_sw_symmetry`/`timer_initialize` — before any real computation.
+Ruled out so far: not the grid-decomposition search (identical hang
+with an explicit valid `nproc_ob=8`); not `UCX_TLS` transport selection
+(tried restricting to `rc,sm,self,cuda_copy,cuda_ipc`, no change); not
+plain stdin-read-then-broadcast in isolation (a minimal MPI+stdin
+reproducer mimicking `read_stdin`'s exact pattern — rank 0 reads until
+EOF, then `MPI_Bcast`s the result — works cleanly at 8 ranks/2 nodes).
+`ps`/`/proc/<pid>/syscall` on both nodes shows every rank actively
+`running` (busy, ~96-99% CPU), not blocked in a syscall — same
+"busy-but-stuck" signature as the two single-node bugs, but evidently a
+third, distinct cause. Next places to check: `read_Hubbard_parameters`,
+`read_sw_symmetry`, `timer_initialize`, or something in `setup_parallel`
+that only manifests once genuine multi-node communication follows.
