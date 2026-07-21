@@ -438,21 +438,38 @@ make -j$(nproc)
   but it does mean a working GPU build genuinely exists on this cluster:
   **use DGX Spark, not `qc-gh200`, for any real GPU-accelerated SALMON
   benchmarking for now.**
-- **Practical takeaway**: `qc-gh200`'s GPU build has a real, unresolved,
-  silent correctness bug — use its CPU-only `nvhpc-openmp` build instead
-  (ground-state DFT is CPU-recommended by the manual anyway, per
-  `salmon-reference`'s GPU caveat). For actual GPU-accelerated work
-  (particularly TDDFT, the stage the manual recommends GPU for), use
-  DGX Spark's GPU build, which has been verified correct — but only for
-  GS so far; TDDFT on DGX Spark's GPU build is untested, verify its
-  converged energy against a CPU reference before trusting it, using the
-  same cross-check method that caught this bug in the first place.
-- Not yet tried: narrowing down *why* `qc-gh200` specifically fails while
-  DGX Spark doesn't (same NVHPC major version family, different exact
-  version + different GPU architecture) — would need either a matched
-  NVHPC version on both machines, or profiling/debugging SALMON's actual
-  OpenACC kernels directly (e.g. `compute-sanitizer`) rather than
-  black-box energy comparison, to find the real defect.
+- **ROOT CAUSE FOUND: this is an `nvhpc/26.5` compiler regression, not a
+  GPU architecture issue.** Confirmed on Rikyu (see that section below):
+  built SALMON's identical `nvhpc-openacc` GPU recipe there twice, same
+  node, same GB200 GPU, only the NVHPC module version changed.
+  `nvhpc/26.5` → the exact same wrong energy as `qc-gh200`
+  (`-6112.12922835 eV`, bit-for-bit identical). `nvhpc/26.3` → correct
+  (`-6099.94333354 eV`). This is a clean, controlled, single-variable
+  test that isolates the compiler version as the cause: `qc-gh200`
+  (Hopper) and Rikyu (Blackwell GB200) are *different GPU architectures*
+  but both broke identically on 26.5 and both would very likely be fixed
+  by 26.3 — the earlier "architecture" hypothesis was a red herring caused
+  by DGX Spark happening to only have 26.3 available (its sole module
+  option) while `qc-gh200` defaulted to 26.5.
+  - The bug's own character supports a compiler-codegen explanation over
+    a runtime/memory-safety one: it's **deterministic and bit-for-bit
+    reproducible** across completely different physical machines and GPU
+    architectures (not the kind of variability a race condition or
+    uninitialized-buffer bug would produce), and the SCF loop **converges
+    cleanly** through all 100 iterations to a plausible-looking (just
+    wrong) number rather than diverging or NaN-ing — consistent with one
+    specific OpenACC-offloaded routine being miscompiled consistently by
+    `nvfortran` 26.5, not with corrupted state.
+  - **Practical takeaway**: pin `nvhpc/26.3` for any GPU build on
+    machines that offer a choice (`qc-gh200` has `nvhpc/24.3` through
+    `26.5` available — `26.3` specifically has not yet been tried there
+    but is now the first thing to check) rather than defaulting to the
+    newest available version. DGX Spark was accidentally correct only
+    because 26.3 is its sole option.
+  - Not yet done: confirming this same fix on `qc-gh200` itself (rebuild
+    there with `nvhpc/26.3` instead of the `26.5` used so far), or
+    reporting the regression to NVIDIA/checking their release notes for
+    a known OpenACC codegen issue in 26.4/26.5.
 
 ## R-CCS Cloud, genoa (AMD EPYC)
 
@@ -652,3 +669,39 @@ make -j$(nproc)
     per-node config) — a real 1.38x speedup from doubling node count,
     sublinear as expected from communication overhead, but clean genuine
     scaling with no stability or correctness issues.
+
+### Rikyu GPU (GB200, Blackwell) — root-caused the qc-gh200 bug
+
+Same `nvhpc-openacc` recipe as `qc-gh200`/DGX Spark:
+
+```sh
+module load nvhpc/26.3   # NOT 26.5 -- see below
+cd SALMON2 && mkdir build_gpu && cd build_gpu
+python3 ../configure.py --arch=nvhpc-openacc --prefix="$(pwd)/install" -r
+make -j$(nproc)
+```
+
+- **First build used `nvhpc/26.5`** (matching Rikyu's CPU-build choice,
+  for consistency) — reproduced `qc-gh200`'s exact bug: a 1-rank/1-GPU
+  GS smoke test converged cleanly through 100 iterations to
+  `Total Energy -6112.12922835 eV` — **bit-for-bit identical** to
+  `qc-gh200`'s wrong value, on completely different GPU hardware
+  (GB200/Blackwell here vs. GH200/Hopper there). No MPI errors at all
+  (1 rank, no collectives) — confirms again this isn't an MPI/UCX issue.
+- **Rebuilt identically, only swapping `nvhpc/26.5` → `nvhpc/26.3`**
+  (same node, same physical GPU, same everything else) — **fixed it
+  completely**: `Total Energy -6099.94333354 eV`, correct.
+- **This is the root cause of the `qc-gh200` bug**: an `nvhpc/26.5`
+  OpenACC compiler regression, not a GPU-architecture-specific issue —
+  see `qc-gh200`'s section above for the full reasoning (why the bug's
+  deterministic, clean-converging character points at compiler codegen
+  rather than a runtime/memory-safety bug) and the corrected picture
+  (DGX Spark was only ever accidentally correct because 26.3 is its sole
+  available module version, not because Blackwell is immune).
+- Not yet done: rebuilding `qc-gh200` itself with `nvhpc/26.3` to confirm
+  the same fix applies there (same module family, `26.3` is available
+  there too) — the natural next step to close this out completely.
+- Multi-rank (4 GPUs/node, per the "1 MPI rank = 1 GPU" convention) not
+  yet tested — this session's GPU work stopped at the 1-rank
+  root-causing step; scaling to 4 ranks/4 GPUs on `nvhpc/26.3` is the
+  next thing to try.
