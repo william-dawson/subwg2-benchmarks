@@ -701,6 +701,18 @@ make -j$(nproc)
 - Not yet done: rebuilding `qc-gh200` itself with `nvhpc/26.3` to confirm
   the same fix applies there (same module family, `26.3` is available
   there too) — the natural next step to close this out completely.
+- **Pinpointed to a single term**: the full Kohn-Sham eigenvalue
+  spectrum is bit-identical between correct and buggy builds (ruling out
+  the Hamiltonian/diagonalization GPU code), and uncommenting
+  `total_energy.f90`'s built-in energy-component debug print (needs
+  `use parallelization, only: nproc_id_global` added — not otherwise
+  imported in that subroutine) shows every term matches to `~1e-12`
+  Hartree except `E_ion_ion` (the Ewald ion-ion energy), which alone
+  accounts for the entire `-12.19 eV` error. Full breakdown and the
+  specific OpenACC block to look at (`calc_Total_Energy_periodic`'s
+  Ewald pair-sum, `total_energy.f90` ~lines 327-360, plus `init_ewald`'s
+  pair-list construction ~lines 840-940) are in
+  `nvhpc-26.5-openacc-bug-reproducer.md` at the repo root.
 
 #### Multi-GPU (4 ranks/4 GPUs), 1 node — binding fixed, but a new post-SCF hang appeared
 

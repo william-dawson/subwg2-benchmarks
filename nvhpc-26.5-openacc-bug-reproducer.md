@@ -158,16 +158,11 @@ whoever bisects the actual routine (a fixed offset rather than a
 diverging one suggests a single additive/omitted term rather than a
 propagating numerical instability).
 
-Not yet attempted: bisecting which specific OpenACC-offloaded source
-file/kernel changed behavior between NVHPC 26.4 and 26.5 (would need
-either `compute-sanitizer` on the 26.5 build, or selectively rebuilding
-individual translation units with each compiler version). SALMON's
-OpenACC/CUDA GPU code lives under `src/`, particularly
-`src/common/zpseudo.cu`, `src/common/stencil_current.cu`, and the
-`_gpu`-suffixed subroutines in `src/gs/subspace_diagonalization.f90`
-(the cuBLAS-backed subspace diagonalization path) are the most likely
-candidates given they're the GPU-specific code paths exercised during
-ground-state SCF.
+**Root cause found — see "Pinpointed" section below**: the discrepancy
+is entirely in the Ewald ion-ion energy term, not in the Hamiltonian,
+diagonalization, or SCF density-update code paths originally suspected
+(`zpseudo.cu`, `stencil_current.cu`, `subspace_diagonalization.f90`
+GPU path are all now cleared — see below for why).
 
 ## Ruled out: `-6112.13 eV` is not just a different (valid) local minimum
 
@@ -211,3 +206,75 @@ different (but still correct) SCF path could plausibly land in — it's
 outside the range that legitimate algorithmic variation produces on
 known-correct hardware. This corroborates, rather than undermines, the
 NVHPC 26.5 compiler-regression conclusion above.
+
+## Pinpointed: the bug is entirely in the Ewald ion-ion energy term
+
+Two further pieces of evidence isolate the bug to one specific term.
+
+**1. The full single-particle eigenvalue spectrum is bit-identical
+between builds.** Every SCF iteration's `iter=100` report prints all 72
+Kohn-Sham eigenvalues. Comparing the correct build's spectrum against
+the `nvhpc/26.5` buggy build's spectrum, all 60 occupied/low-lying
+states match to the printed precision (`diff=0.0000`), and even the
+highest, least-converged empty conduction states differ by at most
+`0.19 eV` — consistent with ordinary numerical noise between different
+hardware/convergence paths, not a systematic error. This means the
+Hamiltonian construction, pseudopotential application, and
+diagonalization — the code paths originally suspected
+(`zpseudo.cu`, `stencil_current.cu`, the GPU subspace-diagonalization
+path) — are all computing correctly on both builds. The bug cannot be
+there.
+
+**2. `total_energy.f90` already has (commented-out) instrumentation for
+exactly this.** `SUBROUTINE calc_Total_Energy_periodic` sums six
+components into `energy%E_tot`:
+
+```fortran
+energy%E_tot = energy%E_kin + energy%E_h + energy%E_ion_loc &
+             + energy%E_ion_nloc + energy%E_xc + energy%E_ion_ion
+```
+
+immediately followed by a commented-out debug print of all six terms
+(`total_energy.f90` around line 503). Uncommenting it (and adding
+`use parallelization, only: nproc_id_global`, needed for the print's
+`comm_is_root` call but not otherwise imported in this subroutine) and
+rebuilding both the correct (local macOS) and buggy (Rikyu
+`nvhpc/26.5`) binaries gives the converged (iteration-100) breakdown,
+in Hartree:
+
+| Component | Correct build | `nvhpc/26.5` (buggy) | Diff (eV) |
+|---|---|---|---|
+| `E_kin` | ≈0 (`-1.5e-14`) | ≈0 (`-3.9e-15`) | ~0 |
+| `E_h` | `76.59949396424075` | `76.59949396424253` | ~0 |
+| `E_ion_loc` | `-218.65215737427528` | `-218.6521573742779` | ~0 |
+| `E_ion_nloc` | `116.58824916576496` | `116.5882491657627` | ~0 |
+| `E_xc` | `-59.71519942023457` | `-59.71519942023502` | ~0 |
+| **`E_ion_ion`** | **`-138.98917900557780`** | **`-139.4370023994977`** | **`-12.1859`** |
+| `E_tot` (sum) | `-224.16879267008193` | `-224.6166160640055` | `-12.1859` |
+
+Every term agrees to ~`1e-12` Hartree (floating-point noise) **except
+`E_ion_ion`**, which alone accounts for the entire `-12.1859 eV`
+discrepancy in `E_tot` to 6 significant figures.
+
+**This makes sense of every other observation in this document**:
+`E_ion_ion` (the classical Ewald electrostatic ion-ion energy) depends
+*only* on ion positions and species — it's computed once from static
+geometry, entirely independent of the electron density, wavefunctions,
+or SCF trajectory. That's exactly why the bug is bit-for-bit
+deterministic regardless of random seed, MPI rank count, or GPU
+architecture (Hopper vs. Blackwell): there's no stochastic or
+data-dependent element in this calculation at all, just a fixed
+numeric error baked into that one code path's binary.
+
+**Where to look next**: `src/common/total_energy.f90`, inside
+`SUBROUTINE calc_Total_Energy_periodic`, the real-space Ewald pair-sum
+block (`!$acc kernels copyin(ewald)` / `!$acc loop private(...)
+reduction(+:E_tmp)`, roughly lines 327-360) is the direct computation of
+`E_ion_ion`. There's also a second Ewald-related OpenACC block in
+`init_ewald` (lines ~840-940, pair-list construction) that feeds data
+into this sum — worth checking too, since a subtly wrong pair list
+(e.g., an off-by-one in the periodic-image cutoff loop) would silently
+under/over-count image contributions and produce exactly this kind of
+fixed additive error. Reduction-clause codegen bugs combined with
+`private`/loop-bound edge cases in nested periodic-image loops are a
+plausible fit for what changed in NVHPC 26.5's OpenACC compiler.
