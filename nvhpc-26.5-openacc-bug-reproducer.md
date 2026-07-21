@@ -168,3 +168,46 @@ OpenACC/CUDA GPU code lives under `src/`, particularly
 (the cuBLAS-backed subspace diagonalization path) are the most likely
 candidates given they're the GPU-specific code paths exercised during
 ground-state SCF.
+
+## Ruled out: `-6112.13 eV` is not just a different (valid) local minimum
+
+One legitimate alternative explanation for the discrepancy: SCF is a
+nonlinear fixed-point iteration, so a different initial guess or
+algorithm choice could in principle converge to a different, equally
+valid, local minimum — in which case the "wrong" NVHPC 26.5 answer
+wouldn't be a bug so much as a different (if unlucky) basin of
+attraction.
+
+This was tested directly on the trusted CPU (Homebrew/GCC, no NVHPC
+involved) local macOS build, using the exact same input above and
+varying only `&scf` settings, one axis at a time, all at fixed rank
+count (`mpirun -n 4`, which fixes the domain-decomposition-derived
+random seed baseline — see `iseed_number_change` below):
+
+| `&scf` variant | Total Energy (eV) |
+|---|---|
+| baseline (`method_init_wf='random'`, Broyden mixing, subspace diag on) | `-6099.94333354` |
+| `method_init_wf='gauss'` | `-6099.94333354` |
+| `method_init_wf='gauss10'` | `-6099.94333354` |
+| `yn_subspace_diagonalization='n'` | `-6099.61361133` |
+| `method_mixing='simple'` | `-6099.94333354` |
+| `method_mixing='pulay'` | `-6099.94333354` |
+| `iseed_number_change=1000` (different random seed) | `-6099.94333354` |
+| `iseed_number_change=5000` (different random seed) | `-6099.94333354` |
+
+Seven of eight variants — including two different random seeds and two
+different deterministic (Gaussian) initial guesses — converge to
+*exactly* the same energy to 8 decimal places. The lone outlier
+(subspace diagonalization disabled) differs by only `0.33 eV`, most
+plausibly from orbital reordering near-degeneracies settling slightly
+differently, not a distinct basin. None of these get anywhere close to
+`-6112.13 eV` (12.19 eV away — ~37x larger than the biggest deviation
+any legitimate algorithm variant produced).
+
+**Conclusion**: `-6099.94 eV` is a robust, essentially unique SCF fixed
+point for this system, reachable from a wide variety of starting points
+and algorithms. `-6112.13 eV` is not a nearby alternative basin that a
+different (but still correct) SCF path could plausibly land in — it's
+outside the range that legitimate algorithmic variation produces on
+known-correct hardware. This corroborates, rather than undermines, the
+NVHPC 26.5 compiler-regression conclusion above.
