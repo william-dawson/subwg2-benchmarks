@@ -539,10 +539,20 @@ make -j$(nproc)
 - `mpirun` confirmed working for this (single-rank) test; per
   `mvmc-build`'s own DGX Spark section, `srun` is unsupported by this
   partition's bundled Open MPI (no Slurm PMI support) — use `mpirun`.
+- **TDDFT on GPU verified correct — and fast, exactly as the manual
+  promises.** Ran the follow-up `tddft_response` stage (`nt=300`) from
+  this GS run's restart data, still 1 rank = 1 GPU: `Total Energy
+  -6099.81098920 eV`, electron count conserved to `95.99999985` —
+  **exact match** to the CPU (Mac, `genoa`) TDDFT results for the same
+  input. **10.81s**, vs. `genoa`'s CPU-only 49.48s for the identical
+  `nt=300` run — ~4.6x faster on GPU, matching `salmon-reference`'s GPU
+  caveat ("TDDFT is well-tuned for GPU, DFT is not") concretely for the
+  first time. This is currently the only machine with both GS *and*
+  TDDFT verified correct on a GPU build.
 - Not yet tested: multi-rank on this partition (each node has how many
   GPUs? — `mvmc-build`'s own DGX Spark section describes 20 CPU cores
   but doesn't mention GPU count; check before assuming 1 GPU/node the
-  way `qc-gh200` is), or TDDFT specifically (only GS verified so far).
+  way `qc-gh200` is).
 
 ## RIKYU (GB200 NVL4, Grace CPU)
 
