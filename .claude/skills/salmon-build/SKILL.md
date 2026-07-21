@@ -26,10 +26,11 @@ issue despite early appearances — see that section for the full,
 corrected diagnostic trail). **DGX Spark's GPU build (same
 `nvhpc-openacc` preset, different GPU generation — GB10/Blackwell vs.
 GH200/Hopper) gives the *correct* answer** — it's the machine to use for
-actual GPU-accelerated SALMON work right now. Rikyu not yet attempted —
-unlike `mvmc-build`, this skill does not yet have a working recipe for
-every machine. Add sections here as each one is actually built, following
-the
+actual GPU-accelerated SALMON work right now. **Rikyu's CPU-only build is
+fully verified**, including a working MPI+OpenMP hybrid recipe and clean
+2-node scaling (see that section for the InfiniBand/UAR caveat at full
+144-rank-per-node density) — Rikyu's GPU build not yet attempted. Add
+sections here as each one is actually built, following the
 same pattern.
 
 ```sh
@@ -616,4 +617,28 @@ make -j$(nproc)
     *same* 144 total cores. Hybrid genuinely wins here, once bound
     correctly — same conclusion as `genoa`, different specific binding
     flags needed due to the different (multi-socket) topology.
-- Multi-node: not yet tested.
+- **Two-node hybrid: clean, correct, genuine scaling.** Doubled the
+  working 1-node hybrid recipe (36 ranks × 4 threads/node) to 2 nodes (72
+  ranks total, 288 cores, same `--map-by socket:PE=4 --bind-to core`).
+  **Rikyu's scheduler ties CPU allocation to GPU request count** — a
+  CPU-only 2-node job with no GPU request failed outright:
+  `Requested CPUs (4 cpus-per-task x 72 tasks = 288) exceed the per-GPU
+  cap 32 (= 1 GPU x 32)`. Fixed by setting `resources.gpus=8` (4/node ×
+  2 nodes, i.e. request the full GPU allocation even though this run
+  doesn't use the GPUs at all) — this renders to `--gpus=8` in the sbatch
+  script and unlocks the CPU count actually needed; there's no way to get
+  full-node CPU access on this scheduler without also claiming the GPUs
+  that come with it.
+  - Result (verified on 2 distinct physical nodes, confirmed via
+    `meta_data.nodes` in the job status): `Total Energy -50383.80194452
+    eV, gap 6.18737109` — matches the earlier single-node 72-*rank*
+    pure-MPI result almost exactly (same total rank count → same
+    random-initial-orbital SCF trajectory, as expected; the extra
+    threading and node-spanning don't change the physics), zero errors
+    in the log — genuine multi-node InfiniBand communication working
+    cleanly, no UAR exhaustion (36 ranks/node here is comfortably under
+    the density that triggered it at 144 ranks/node).
+  - Timing: **25.04s** (2 nodes) vs. **34.62s** (1 node, same 36×4
+    per-node config) — a real 1.38x speedup from doubling node count,
+    sublinear as expected from communication overhead, but clean genuine
+    scaling with no stability or correctness issues.
