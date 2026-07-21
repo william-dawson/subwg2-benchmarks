@@ -545,4 +545,75 @@ make -j$(nproc)
 
 ## RIKYU (GB200 NVL4, Grace CPU)
 
-Not yet attempted.
+144 cores (2× Neoverse-V2 sockets), 4× GB200 GPUs/node, `nvhpc/26.5`
+(same module family as `qc-gh200`/DGX Spark — `module load nvhpc/26.5`,
+no `system/...` prefix needed here, unlike R-CCS Cloud). Jobs need
+`attributes.account` set explicitly (Rikyu has multiple project
+associations, no default) — this project's mVMC work used `rkp00015`,
+reused here for consistency. CPU-only build (`nvhpc-openmp` preset, same
+recipe as the other NVHPC machines) is fully verified correct.
+
+```sh
+module load nvhpc/26.5
+cd SALMON2 && mkdir build_cpu && cd build_cpu
+python3 ../configure.py --arch=nvhpc-openmp --prefix="$(pwd)/install" -r
+make -j$(nproc)
+```
+
+- **Don't carry over mVMC's Rikyu env vars without re-verifying them for
+  SALMON.** The first attempt reused `UCX_IB_MLX5_DEVX=n` from
+  `mvmc-benchmarking`'s Rikyu findings (there, it fixed an MPI-*startup*
+  registration failure) plus `--bind-to core --map-by core` — and hit a
+  crash: `ib_mlx5_log.c:184 Remote operation error on mlx5_2:1/IB`, a real
+  InfiniBand RDMA completion error, inside UCC (`mca_coll_ucc_bcast` →
+  `ucc_tl_ucp_scatter_knomial_progress`), `SIGABRT`. Tried disabling UCC's
+  collective component (`--mca coll ^ucc`) next — still crashed, same
+  error. **The actual fix was to remove the inherited flags entirely** —
+  a completely bare `mpirun -n 4 ./salmon < input.nml`, no env vars, no
+  `--mca` flags at all, ran cleanly: `Total Energy -6099.94333354 eV, gap
+  5.71749793 eV` (correct, matches every other machine), 26.67s. The
+  lesson mVMC learned about this InfiniBand stack doesn't transfer
+  automatically to a different code/MPI-collective-usage-pattern — verify
+  fresh on each new codebase rather than assuming an old workaround still
+  applies (or is still needed at all).
+- Single-node scaling (4/36/72/144 ranks — all factor cleanly into 2s and
+  3s, satisfying SALMON's automatic `&parallel` assignment requirement
+  per `salmon-reference`): see `salmon-benchmarking` for recorded numbers.
+- **MPI+OpenMP hybrid works well, but only with correct binding.** Rikyu
+  has 144 cores across exactly 2 CPU sockets (`numactl --hardware` shows
+  34 "NUMA nodes," but 32 of them are CPU-less GPU-memory-only nodes —
+  the 4 GB200 GPUs' memory pools — only nodes 0 (cpus 0-71) and 1 (cpus
+  72-143) have any CPUs; don't be misled by the raw NUMA node count into
+  thinking this is a complex CPU topology, it's just 2 sockets).
+  - **First attempt used `--bind-to none`** (copied from what worked on
+    `genoa` — but `genoa` is single-socket, so unconstrained thread
+    placement was harmless there). On Rikyu's 2-socket topology this let
+    threads scatter across sockets — the run hadn't even finished the
+    `init_ps` setup phase after 3.5+ minutes (the pure-MPI baseline
+    finishes the *entire* run in ~65s), a clear sign of severe cross-
+    socket memory-access thrashing. Never let it finish; killed it.
+  - **`--map-by numa:PE=4` failed outright**: "A request was made to bind
+    that would require binding processes to more cpus than are available
+    in your allocation" — Open MPI's NUMA-aware mapper gets confused by
+    the 32 CPU-less NUMA nodes in the topology.
+  - **`--map-by socket:PE=4 --bind-to core` also failed the same way at
+    first** — but the real cause wasn't the mapping policy, it was the
+    **Slurm allocation itself**: `processes_per_node=36` with no
+    `cpu_cores_per_process` set only reserves 1 core/task (36 cores
+    total) by default, so Open MPI correctly refused to bind 4
+    threads/rank when the job's own cgroup only had 36 cores available.
+    Setting `resources.cpu_cores_per_process=4` alongside
+    `processes_per_node=36` (renders to `--ntasks-per-node=36
+    --cpus-per-task=4` in the sbatch script — verify this with `cat` on
+    the rendered `agent/jobs/*.sh` script, don't just assume the resource
+    spec mapped the way you intended) fixed it.
+  - **Result, with both the binding flags and the Slurm allocation
+    correct**: 36 ranks × 4 threads (144 total, matching pure-MPI 144's
+    core count) — `Total Energy -55125.19516013 eV, gap 6.92196378`
+    (bit-for-bit matches the pure-36-rank baseline, confirming
+    correctness), **34.62s** — 1.89x faster than pure-MPI 36 ranks
+    (65.32s) and 1.74x faster than pure-MPI 72 ranks (60.29s) using the
+    *same* 144 total cores. Hybrid genuinely wins here, once bound
+    correctly — same conclusion as `genoa`, different specific binding
+    flags needed due to the different (multi-socket) topology.
+- Multi-node: not yet tested.
